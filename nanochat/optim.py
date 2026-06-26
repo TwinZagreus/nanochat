@@ -14,11 +14,28 @@ from nanochat.common import COMPUTE_DTYPE
 
 # -----------------------------------------------------------------------------
 """
+Conditional torch.compile: becomes a no-op when TORCH_COMPILE_DISABLE=1.
+This allows scripts to disable compilation before this module is imported
+(e.g., on Windows without MSVC compiler).
+"""
+import os as _os
+
+def _conditional_compile(fn=None, *, dynamic=False, fullgraph=True):
+    def decorator(fn):
+        if _os.environ.get("TORCH_COMPILE_DISABLE"):
+            return fn
+        return torch.compile(fn, dynamic=dynamic, fullgraph=fullgraph)
+    if fn is None:
+        return decorator
+    return decorator(fn)
+
+# -----------------------------------------------------------------------------
+"""
 Good old AdamW optimizer, fused kernel.
 https://arxiv.org/abs/1711.05101
 """
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_conditional_compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(
     p: Tensor,              # (32768, 768) - parameter tensor
     grad: Tensor,           # (32768, 768) - gradient, same shape as p
@@ -88,7 +105,7 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_conditional_compile(dynamic=False, fullgraph=True)
 def muon_step_fused(
     stacked_grads: Tensor,          # (12, 768, 3072) - stacked gradients
     stacked_params: Tensor,         # (12, 768, 3072) - stacked parameters

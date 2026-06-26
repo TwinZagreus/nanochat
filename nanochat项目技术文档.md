@@ -239,45 +239,78 @@ export OMP_NUM_THREADS=1
 
 以下是**端到端训练**的完整流程，对应 `runs/speedrun.sh` 脚本。整个过程在 8×H100 上大约需要 2-3 小时。
 
-> **提示**：建议在 `screen` 或 `tmux` 会话中运行，以防止连接断开导致训练中断：
-> ```bash
-> screen -L -Logfile speedrun.log -S speedrun bash runs/speedrun.sh
-> ```
+本章提供 **Linux** 和 **Windows** 两套命令。主体命令相同（均为 Python 脚本），区别在于 Shell 语法（环境变量设置、后台进程管理等）。
+
+> **通用提示**：建议在后台会话中运行，防止连接断开导致训练中断：
+> - Linux：`screen -L -Logfile speedrun.log -S speedrun`
+> - Windows：无法使用 screen，建议保持终端窗口开启（或使用 `Start-Process` 后台启动）
 
 ---
 
 #### 步骤 1：运行完整速通脚本
 
-最简单的方式是直接执行预配置好的脚本：
+**Linux**：
 
 ```bash
 bash runs/speedrun.sh
 ```
 
-脚本自动完成所有步骤（见下方拆解）。如果要分步执行，按以下流程操作。
+**Windows (PowerShell)**：
+
+speedrun.sh 全部是 `python` / `torchrun` 命令，只需按顺序逐条执行即可。没有对应的 bash 脚本，直接跳到步骤 2 手动分步执行。
 
 ---
 
 #### 步骤 2（分步）：初始化报告
 
+**Linux**：
+
 ```bash
-# 清理旧报告并写入运行环境信息（GPU型号、Git版本、系统信息等）
-python -m nanochat.report reset
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"   # 设置所有中间产物的存储根目录
+export OMP_NUM_THREADS=1                            # 限制 OpenMP 线程数，避免与 PyTorch 资源竞争
+python -m nanochat.report reset                     # 清空旧报告，写入当前运行环境信息（GPU型号、Git版本等）
 ```
+
+**Windows (PowerShell)**：
+
+```powershell
+$env:NANOCHAT_BASE_DIR = "$env:USERPROFILE\.cache\nanochat"  # 设置所有中间产物的存储根目录
+$env:OMP_NUM_THREADS = "1"                                    # 限制 OpenMP 线程数
+python -m nanochat.report reset                                # 清空旧报告，写入当前运行环境信息
+```
+
+> **如果想把数据存到其他路径**（如 D 盘）：
+> ```powershell
+> $env:NANOCHAT_BASE_DIR = "D:\project\python\nanochat\data"
+> ```
 
 ---
 
 #### 步骤 3（分步）：训练分词器
 
+**Linux**：
+
 ```bash
-# 下载前 8 个数据分片用于分词器训练
-# 每个分片约 ~250M 字符，8 个分片约 ~2B 字符
+# 下载前 8 个数据分片用于分词器训练（每个分片约 250M 字符，共约 2B 字符）
 python -m nanochat.dataset -n 8
 
 # 训练 BPE 分词器（词表大小 32768 = 2^15）
 python -m scripts.tok_train
 
 # 评估分词器压缩率（与 GPT-2 和 GPT-4 分词器对比）
+python -m scripts.tok_eval
+```
+
+**Windows (PowerShell)**：
+
+```powershell
+# 下载前 8 个数据分片（每个分片约 250M 字符，共约 2B 字符）
+python -m nanochat.dataset -n 8
+
+# 训练 BPE 分词器（词表大小 32768 = 2^15）
+python -m scripts.tok_train
+
+# 评估分词器（与 GPT-2 和 GPT-4 对比压缩率）
 python -m scripts.tok_eval
 ```
 
@@ -289,7 +322,8 @@ python -m scripts.tok_eval
 | `--doc-cap` | 10,000 | 单文档最大字符数（截断） |
 | `--vocab-size` | 32768 | 词表大小 |
 
-分词的中间产物保存在 `$NANOCHAT_BASE_DIR/tokenizer/` 下：
+分词的中间产物保存在 `$env:NANOCHAT_BASE_DIR\tokenizer\` 下：
+
 - `tokenizer.pkl` — 分词器模型
 - `token_bytes.pt` — 每个 token 的字节数缓存（用于 bpb 计算）
 
@@ -297,34 +331,77 @@ python -m scripts.tok_eval
 
 #### 步骤 4（分步）：后台下载更多数据
 
-```bash
-# 后台下载 170 个分片（约 40GB），用于预训练
-# GPT-2 级别训练大约需要 150 个分片，多下载 20 个作为余量
-# 数据集总共有 6542 个分片
-python -m nanochat.dataset -n 170 &
+**Linux**：
 
-# 记录下载进程ID，后面预训练前需要等下载完成
+```bash
+# 启动下载 170 个分片（约 40GB），后台运行
+python -m nanochat.dataset -n 170 &
 DATASET_DOWNLOAD_PID=$!
 ```
 
-数据集分片保存在 `$NANOCHAT_BASE_DIR/base_data_climbmix/` 下，文件名为 `shard_00001.parquet` 到 `shard_NNNNN.parquet`。
+**Windows (PowerShell)**：
+
+```powershell
+# 启动下载 170 个分片（约 40GB），使用 Start-Process 在新窗口中后台运行
+Start-Process python -ArgumentList "-m", "nanochat.dataset", "-n", "170" -NoNewWindow
+
+# 注意：Windows 上没有 wait 命令的等价物，
+# 可以通过检查 $env:NANOCHAT_BASE_DIR\base_data_climbmix\ 下的文件数量来判断下载是否完成
+# 目标：至少 150 个 shard_xxxxx.parquet 文件
+```
+
+> **获取下载进度**：
+> ```powershell
+> # 查看已下载文件数
+> (Get-ChildItem "$env:NANOCHAT_BASE_DIR\base_data_climbmix\shard_*.parquet").Count
+> ```
+
+数据集分片保存在 `$env:NANOCHAT_BASE_DIR\base_data_climbmix\` 下，文件名为 `shard_00001.parquet` 到 `shard_NNNNN.parquet`。GPT-2 级别训练大约需要 150 个分片。
 
 ---
 
 #### 步骤 5（分步）：预训练基础模型
 
-```bash
-# 等待数据下载完成
-wait $DATASET_DOWNLOAD_PID
+> **前置检查**：确保步骤 4 的下载已完成（分片数 >= 150）。
 
-# 启动 8 GPU 分布式预训练
+**Linux**：
+
+```bash
+wait $DATASET_DOWNLOAD_PID                              # 等待后台下载完成
+# 启动 8 GPU 分布式预训练（核心步骤，耗时~1.5-2小时）
 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
-    --depth=24 \
-    --target-param-data-ratio=8 \
-    --device-batch-size=16 \
-    --fp8 \
-    --run=speedrun
+    --depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run=speedrun
 ```
+
+**Windows (PowerShell)**：
+
+```powershell
+# 启动 8 GPU 分布式预训练（核心步骤，耗时~1.5-2小时）
+# torchrun 负责多GPU通信，--standalone 表示单节点模式，--nproc_per_node=8 表示使用8个GPU
+torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- `
+    --depth=24 `                    # 模型层数，d24约等于GPT-2的1.6B参数量
+    --target-param-data-ratio=8 `   # Token/参数比，8=略欠训练但要快，12=计算最优
+    --device-batch-size=16 `        # 每GPU每步处理16个序列
+    --fp8 `                         # 启用FP8混合精度训练加速（仅H100+）
+    --run=speedrun                  # wandb运行名称
+
+
+# 单GPU/低配GPU 快速验证命令（Windows/PowerShell，约15秒跑完）
+python -m scripts.base_train `
+    --depth=4 `                 # 4层Transformer，约37M参数
+    --max-seq-len=256 `         # 序列长度256（完整训练用2048）
+    --device-batch-size=1 `     # 每步1个序列（4GB显存也能跑）
+    --total-batch-size=512 `    # 全局批次512 token
+    --num-iterations=100 `      # 只跑100步验证流程
+    --window-pattern=L `        # 全上下文注意力（非H100 GPU必须）
+    --core-metric-every=-1 `    # -1=跳过CORE评估（省时间）
+    --sample-every=-1 `         # -1=跳过文本采样
+    --eval-every=-1 `           # -1=跳过验证集评估
+    --run=dummy                 # 不记录wandb日志
+
+```
+
+> **幂等Shell 换行符**：Linux 用 `\`，PowerShell 用 `` ` ``（反引号）。
 
 各参数的含义和调参建议：
 
@@ -363,7 +440,7 @@ step 00250/07800 (3.21%) | loss: 0.385672 | lrm: 1.00 | dt: 342.15ms | tok/sec: 
 | `epoch / pq / rg` | 数据遍历状态：第几个epoch，第几个parquet文件，第几个row group |
 | `total time / eta` | 累计训练时间 / 预估剩余时间 |
 
-**检查点结构**（保存在 `$NANOCHAT_BASE_DIR/base_checkpoints/d24/`）：
+**检查点结构**（保存在 `$env:NANOCHAT_BASE_DIR\base_checkpoints\d24\`）：
 
 ```
 model_007800.pt       # 模型参数
@@ -377,11 +454,22 @@ meta_007800.json       # 元数据（配置、数据加载器状态、循环状�
 
 #### 步骤 6（分步）：评估基础模型
 
+**Linux**：
+
 ```bash
+# 多GPU评估基础模型：CORE指标 + BPB + 文本生成样本
+torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16
+```
+
+**Windows (PowerShell)**：
+
+```powershell
+# 多GPU评估基础模型：CORE指标 + BPB + 文本生成样本
 torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16
 ```
 
 评估内容：
+
 - **CORE 指标**（DCLM 标准评估）
 - **BPB**（bits per byte，验证集和训练集）
 - **文本生成样本**（多个提示词的补全）
@@ -390,17 +478,34 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-
 
 #### 步骤 7（分步）：监督微调（SFT）
 
+**Linux**：
+
 ```bash
-# 下载身份对话数据（约 2.3MB），给模型赋予个性
+# 下载身份对话数据：给模型赋予"个性"（名字、爱好、创作者等）
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl \
   https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
-# 启动 SFT 训练
+# 多GPU监督微调：让模型学会对话格式、工具调用、多选题等能力
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- \
-    --device-batch-size=16 \
+    --device-batch-size=16 --run=speedrun
+
+# 多GPU评估对话模型：ChatCORE 指标（ARC, MMLU, GSM8K, HumanEval, SpellingBee）
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+```
+
+**Windows (PowerShell)**：
+
+```powershell
+# 下载身份对话数据（约 2.3MB）：给模型赋予"个性"
+Invoke-WebRequest -Uri "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl" `
+    -OutFile "$env:NANOCHAT_BASE_DIR\identity_conversations.jsonl"
+
+# 多GPU监督微调：让模型学会对话格式、工具调用、多选题等能力
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- `
+    --device-batch-size=16 `
     --run=speedrun
 
-# 评估 SFT 后的对话模型
+# 多GPU评估对话模型：ChatCORE 指标
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
 ```
 
@@ -419,13 +524,23 @@ SFT 训练混合了以下数据（详见 `scripts/chat_sft.py`）：
 
 #### 步骤 8（分步）：生成训练报告
 
+**Linux**：
+
 ```bash
+# 汇总所有阶段的日志，生成完整训练报告（report.md）
 python -m nanochat.report generate
 ```
 
-生成 `$NANOCHAT_BASE_DIR/report/report.md` 并复制到当前目录，包含所有阶段的指标汇总：
+**Windows (PowerShell)**：
 
-- 分词器压缩率对比
+```powershell
+# 汇总所有阶段的日志，生成完整训练报告（report.md）
+python -m nanochat.report generate
+```
+
+生成的文件路径：`$env:NANOCHAT_BASE_DIR\report\report.md`（并复制到当前目录），内容包含：
+
+- 分词器压缩率对比 (GPT-2 vs GPT-4 vs Ours)
 - 预训练 CORE 指标和 BPB
 - SFT 后 ChatCORE（ARC-Easy, ARC-Challenge, MMLU, GSM8K, HumanEval, SpellingBee）
 - 各阶段训练时间、算力消耗、成本估算
@@ -445,35 +560,35 @@ bash runs/runcpu.sh
 
 ```bash
 # 1. 环境配置
-export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"
-mkdir -p $NANOCHAT_BASE_DIR
-uv sync --extra cpu
-source .venv/bin/activate
+export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"  # 数据存储目录
+mkdir -p $NANOCHAT_BASE_DIR                        # 确保目录存在
+uv sync --extra cpu                                # 安装CPU版PyTorch
+source .venv/bin/activate                          # 激活虚拟环境
 
 # 2. 分词器训练（约 34 秒，M3 Max）
-python -m nanochat.dataset -n 8
-python -m scripts.tok_train --max-chars=2000000000
-python -m scripts.tok_eval
+python -m nanochat.dataset -n 8                     # 下载8个数据分片（约800MB）
+python -m scripts.tok_train --max-chars=2000000000  # 用2B字符训练分词器
+python -m scripts.tok_eval                           # 评估分词器压缩率
 
 # 3. 训练小型模型（约 30 分钟，M3 Max）
 python -m scripts.base_train \
-    --depth=6 \             # 仅 6 层
-    --head-dim=64 \         # 注意力头维度 64
-    --window-pattern=L \    # 全上下文注意力（SDPA不支持窗口）
-    --max-seq-len=512 \     # 短序列
-    --device-batch-size=32 \
-    --total-batch-size=16384 \
-    --eval-every=100 \
-    --eval-tokens=524288 \
-    --core-metric-every=-1 \  # 训练期间跳过CORE评估
-    --sample-every=100 \
-    --num-iterations=5000 \
-    --run=dummy
+    --depth=6 \              # 仅 6 层（完整训练用 d24）
+    --head-dim=64 \          # 注意力头维度 64（默认128）
+    --window-pattern=L \     # 全上下文注意力（SDPA不支持滑动窗口）
+    --max-seq-len=512 \      # 短序列（完整训练用2048）
+    --device-batch-size=32 \ # 每步序列数
+    --total-batch-size=16384 \ # 全局批次大小
+    --eval-every=100 \       # 每100步评估验证损失
+    --eval-tokens=524288 \   # 评估用token数
+    --core-metric-every=-1 \ # -1=训练期间跳过CORE评估（省时间）
+    --sample-every=100 \     # 每100步生成文本样本
+    --num-iterations=5000 \  # 训练步数
+    --run=dummy              # 跳过wandb日志
 
-# 4. 基础模型评估
+# 4. 基础模型评估：CORE指标 + BPB + 文本样本
 python -m scripts.base_eval --device-batch-size=1 --split-tokens=16384 --max-per-task=16
 
-# 5. SFT（约 10 分钟，M3 Max）
+# 5. SFT 监督微调（约 10 分钟，M3 Max）
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl \
   https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 python -m scripts.chat_sft \
@@ -497,18 +612,19 @@ python -m scripts.chat_sft \
 #### 命令行对话（chat_cli.py）
 
 ```bash
-# 单次问答模式
+# 单次问答模式：模型回答后自动退出
 python -m scripts.chat_cli -p "为什么天空是蓝色的？"
 
-# 交互式对话
+# 交互式对话模式：持续对话直到输入 quit/exit
 python -m scripts.chat_cli
 
-# 参数说明：
-#   -i sft|rl    模型来源（默认 sft）
-#   -g d24       模型标识
-#   -t 0.8       采样温度
-#   -k 50        top-k 采样
-#   --device-type cuda|cpu|mps
+# 关键参数说明：
+#   -i sft|rl      模型训练阶段：sft=监督微调，rl=强化学习（默认 sft）
+#   -g d24         模型标识（对应 base_checkpoints/d24）
+#   -s 7800        检查点步数（不指定则自动取最新）
+#   -t 0.8         采样温度，0=贪婪解码，越高越随机
+#   -k 50          top-k 采样，0=使用全部词表
+#   --device-type  设备类型 cuda|cpu|mps（不指定则自动检测）
 ```
 
 交互命令：
@@ -519,25 +635,25 @@ python -m scripts.chat_cli
 #### Web 对话界面（chat_web.py）
 
 ```bash
-# 启动 Web 服务（单 GPU）
+# 启动 Web 服务（单 GPU）—— 启动后浏览器访问 http://localhost:8000
 python -m scripts.chat_web
 
-# 多 GPU 数据并行（每个 GPU 加载一份完整模型副本）
+# 多 GPU 数据并行 —— 每个 GPU 加载一个完整模型副本，请求自动分发
 python -m scripts.chat_web --num-gpus 4
 
-# 指定模型和端口
+# 完整参数示例
 python -m scripts.chat_web -i sft -g d24 -p 8000
 
-# 参数说明：
-#   -n, --num-gpus    GPU 数量（默认 1）
-#   -i, --source      模型来源 sft|rl（默认 sft）
-#   -g, --model-tag   模型标识（如 d24）
-#   -s, --step        检查点步数
+# 关键参数说明：
+#   -n, --num-gpus    GPU 数量（默认 1），多GPU实现数据并行
+#   -i, --source      模型来源：sft|rl（默认 sft）
+#   -g, --model-tag   模型标识（如 d24），不指定则用最大的模型
+#   -s, --step        检查点步数（不指定则自动取最新）
 #   -p, --port        服务端口（默认 8000）
-#   -t, --temperature 默认温度（0.8）
-#   -k, --top-k       默认 top-k（50）
-#   -m, --max-tokens  默认最大 token 数（512）
-#   --host            绑定地址（默认 0.0.0.0）
+#   -t, --temperature API默认采样温度（0.8）
+#   -k, --top-k       API默认 top-k 采样（50）
+#   -m, --max-tokens  API默认最大生成 token 数（512）
+#   --host            绑定地址（默认 0.0.0.0，允许外部访问）
 ```
 
 启动后打开浏览器访问 `http://localhost:8000`。
@@ -587,6 +703,7 @@ torch.cuda.OutOfMemoryError: CUDA out of memory.
 去掉 `torchrun`，直接运行 Python 脚本。代码会自动使用梯度累积来模拟大批次：
 
 ```bash
+# 单GPU训练：去掉torchrun，直接用python启动，梯度累积自动模拟大批次
 python -m scripts.base_train --depth=24 --device-batch-size=16
 ```
 
@@ -595,7 +712,7 @@ python -m scripts.base_train --depth=24 --device-batch-size=16
 #### Q3: 恢复中断的训练
 
 ```bash
-# 从第 5000 步恢复训练
+# 从第 5000 步恢复训练：加载模型+优化器状态+数据加载器位置，无缝接续
 torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
     --depth=24 --resume-from-step=5000 --run=speedrun
 ```
@@ -612,6 +729,7 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- \
 **解决方案**：添加 `--window-pattern=L` 使用全上下文注意力：
 
 ```bash
+# 强制全上下文注意力：SDPA回退时禁用滑动窗口，避免性能严重下降
 python -m scripts.base_train --depth=24 --window-pattern=L
 ```
 
@@ -637,8 +755,8 @@ nanochat recently switched from FinewebEdu-100B to ClimbMix-400B.
 执行以下命令完成升级：
 
 ```bash
-python -m nanochat.dataset -n 170     # 下载新数据集
-python -m scripts.tok_train           # 重新训练分词器
+python -m nanochat.dataset -n 170     # 重新下载170个ClimbMix分片（约40GB）
+python -m scripts.tok_train           # 基于新数据集重新训练BPE分词器
 ```
 
 #### Q7: uv 同步失败

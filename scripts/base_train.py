@@ -25,6 +25,10 @@ import wandb
 import torch
 import torch.distributed as dist
 
+# Pre-flight check: detect if torch.compile works before importing modules that use it
+from nanochat.common import preflight_compile_check
+preflight_compile_check()
+
 from nanochat.gpt import GPT, GPTConfig, Linear
 from nanochat.dataloader import tokenizing_distributed_data_loader_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
@@ -46,6 +50,8 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # FP8 training
 parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao)")
 parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower)")
+# Compilation
+parser.add_argument("--no-compile", action="store_true", help="disable torch.compile (useful for Windows without MSVC compiler)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -243,7 +249,13 @@ def disable_fp8(model):
 # Compile the model
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+use_compile = not os.environ.get("TORCH_COMPILE_DISABLE")
+if use_compile:
+    model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+    print0("Model compiled with torch.compile (dynamic=False)")
+else:
+    print0("WARNING: torch.compile is disabled. Training will run in eager mode (slower).")
+    # model stays as orig_model (same object), all eval paths work correctly
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.

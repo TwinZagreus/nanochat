@@ -3,7 +3,9 @@ Common utilities for nanochat.
 """
 
 import os
+import sys
 import re
+import time
 import logging
 import urllib.request
 import torch
@@ -82,6 +84,7 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
     """
     Downloads a file from a URL to a local path in the base directory.
     Uses a lock file to prevent concurrent downloads among multiple ranks.
+    Retries up to 5 times on connection errors (common on unstable networks).
     """
     base_dir = get_base_dir()
     file_path = os.path.join(base_dir, filename)
@@ -91,17 +94,24 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
         return file_path
 
     with FileLock(lock_path):
-        # Only a single rank can acquire this lock
-        # All other ranks block until it is released
-
         # Recheck after acquiring lock
         if os.path.exists(file_path):
             return file_path
 
-        # Download the content as bytes
-        print(f"Downloading {url}...")
-        with urllib.request.urlopen(url) as response:
-            content = response.read() # bytes
+        # Download with retries for flaky connections
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                print(f"Downloading {url}..." + (f" (attempt {attempt}/{max_attempts})" if attempt > 1 else ""))
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    content = response.read()
+                break  # success
+            except (OSError, Exception) as e:
+                if attempt == max_attempts:
+                    raise
+                wait = 2 ** attempt
+                print(f"Download failed: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
 
         # Write to local file
         with open(file_path, 'wb') as f:
@@ -117,7 +127,11 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
 def print0(s="",**kwargs):
     ddp_rank = int(os.environ.get('RANK', 0))
     if ddp_rank == 0:
-        print(s, **kwargs)
+        try:
+            print(s, **kwargs)
+        except UnicodeEncodeError:
+            # Windows GBK console fallback: encode to ASCII, replacing unrenderable chars
+            print(s.encode('ascii', errors='replace').decode('ascii'), **kwargs)
 
 def print_banner():
     # Cool DOS Rebel font ASCII banner made with https://manytools.org/hacker-tools/ascii-banner/
@@ -131,7 +145,11 @@ def print_banner():
      ████ █████░░████████ ████ █████░░██████ ░░██████  ████ █████░░███████  ░░█████
     ░░░░ ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░   ░░░░░░  ░░░░ ░░░░░  ░░░░░░░░   ░░░░░
     """
-    print0(banner)
+    try:
+        print0(banner)
+    except UnicodeEncodeError:
+        # Windows GBK console can't render the ASCII art, skip gracefully
+        print0("[nanochat]")
 
 def is_ddp_requested() -> bool:
     """
@@ -276,3 +294,46 @@ def get_peak_flops(device_name: str) -> float:
     # Unknown GPU - return inf so MFU shows as 0% rather than a wrong guess
     logger.warning(f"Peak flops undefined for: {device_name}, MFU will show as 0%")
     return float('inf')
+
+# -----------------------------------------------------------------------------
+# Pre-flight torch.compile capability check
+
+def preflight_compile_check():
+    """
+    Check whether torch.compile can work on this system and set
+    TORCH_COMPILE_DISABLE=1 if it cannot.
+
+    IMPORTANT: Call this BEFORE importing nanochat.gpt (which imports
+    nanochat.optim). The @torch.compile decorators in optim.py evaluate
+    at import time, so the environment variable must be set before then.
+    """
+    # 1) User explicitly requested no-compile via CLI flag
+    if "--no-compile" in sys.argv:
+        os.environ["TORCH_COMPILE_DISABLE"] = "1"
+        logger.info("torch.compile disabled via --no-compile flag")
+        return
+
+    # 2) User explicitly requested no-compile via environment variable
+    if os.environ.get("NANOCHAT_NO_COMPILE", "0") == "1":
+        os.environ["TORCH_COMPILE_DISABLE"] = "1"
+        logger.info("torch.compile disabled via NANOCHAT_NO_COMPILE=1")
+        return
+
+    # 3) Auto-detect: try a tiny torch.compile to see if the C++ compiler is available
+    try:
+        @torch.compile(dynamic=False)
+        def _compile_smoke_test(x):
+            return x.sin().cos()
+        # Use CPU tensor to exercise the C++/OpenMP Inductor backend path
+        _compile_smoke_test(torch.randn(2, 2, device='cpu'))
+        logger.info("torch.compile is available and working")
+    except Exception as e:
+        logger.warning(
+            f"torch.compile is not available on this system. "
+            f"Reason: {e}"
+        )
+        logger.warning(
+            "Training will continue without compilation (slower). "
+            "Use --no-compile flag or set NANOCHAT_NO_COMPILE=1 to skip this check."
+        )
+        os.environ["TORCH_COMPILE_DISABLE"] = "1"

@@ -16,6 +16,8 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import time
 import wandb
 import torch
+from nanochat.common import preflight_compile_check
+preflight_compile_check()
 from nanochat.common import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanochat.tokenizer import get_token_bytes
 from nanochat.checkpoint_manager import save_checkpoint, load_model, load_optimizer_state
@@ -57,6 +59,8 @@ parser.add_argument("--init-lr-frac", type=float, default=0.8, help="initial LR 
 parser.add_argument("--warmup-ratio", type=float, default=0.0, help="ratio of iterations for LR warmup")
 parser.add_argument("--warmdown-ratio", type=float, default=0.5, help="ratio of iterations for LR warmdown")
 parser.add_argument("--final-lr-frac", type=float, default=0.0, help="final LR as fraction of initial LR")
+# Compilation
+parser.add_argument("--no-compile", action="store_true", help="disable torch.compile (useful for Windows without MSVC compiler)")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=200, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
@@ -117,7 +121,12 @@ for name, fallback, source in [
         print0(f"Using {name}={arg_val}")
 
 orig_model = model
-model = torch.compile(model, dynamic=False)
+use_compile = not os.environ.get("TORCH_COMPILE_DISABLE")
+if use_compile:
+    model = torch.compile(model, dynamic=False)
+    print0("Model compiled with torch.compile (dynamic=False)")
+else:
+    print0("WARNING: torch.compile is disabled. Training will run in eager mode (slower).")
 depth = model.config.n_layer
 num_flops_per_token = model.estimate_flops()
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
