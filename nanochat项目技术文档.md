@@ -95,6 +95,7 @@ nanochat/
 │   ├── base_train.py          # 预训练主脚本
 │   ├── base_eval.py           # 基础模型评估
 │   ├── chat_sft.py            # 监督微调
+│   ├── chat_sft_mini.py       # 极简SFT（本地数据，无需HuggingFace）
 │   ├── chat_rl.py             # 强化学习（类GRPO）
 │   ├── chat_eval.py           # 对话模型评估
 │   ├── chat_cli.py            # CLI对话界面
@@ -784,6 +785,37 @@ export NANOCHAT_DTYPE=bfloat16
 # 方案2：使用 fp32（最稳定，但最慢）
 export NANOCHAT_DTYPE=float32
 ```
+
+#### Q9: HuggingFace 连不上（国内网络）
+
+SFT 需要从 HuggingFace 下载 SmolTalk、GSM8K、MMLU 等数据集，墙内无法直接访问。解决方案是使用项目内置的 **极简 SFT 脚本**，只用本地身份 JSONL 数据：
+
+```bash
+# Linux
+curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl \
+  https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+python -m scripts.chat_sft_mini --num-iterations=500 --device-batch-size=16
+
+# Windows PowerShell
+Invoke-WebRequest -Uri "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl" `
+    -OutFile "$env:NANOCHAT_BASE_DIR\identity_conversations.jsonl"
+python -m scripts.chat_sft_mini --num-iterations=500 --device-batch-size=16
+
+# Windows cmd
+curl -L -o "%NANOCHAT_BASE_DIR%\identity_conversations.jsonl" https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+python -m scripts.chat_sft_mini --num-iterations=500 --device-batch-size=16
+```
+
+> `chat_sft_mini.py` 的作用：只加载本地的 identity JSONL，不连 HuggingFace。用 1000 条身份对话数据做 SFT，教会模型基本的对话格式。适合验证流程和网络受限场景，但效果不如完整 SFT（缺少 SmolTalk 的 46 万条通用对话数据）。
+
+`chat_sft_mini.py` 参数说明：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--num-iterations` | 500 | SFT 训练步数 |
+| `--device-batch-size` | 16 | 每步序列数 |
+| `--max-seq-len` | 512 | 最大上下文长度 |
+| `--lr` | 1e-4 | 学习率 |
 
 ---
 
