@@ -33,7 +33,7 @@ from nanochat.checkpoint_manager import load_model
 from nanochat.tokenizer import get_tokenizer
 from tasks.customjson import CustomJSON
 
-# Load base model
+# 加载预训练基座模型 / Load base model
 model, tokenizer, meta = load_model("base", device, phase="train")
 print0(f"Loaded base model d{model.config.n_layer}, step {meta['step']}")
 
@@ -45,14 +45,25 @@ assert os.path.exists(identity_path), f"Not found: {identity_path}. Download wit
 train_dataset = CustomJSON(filepath=identity_path)
 print0(f"Training data: {len(train_dataset)} conversations")
 
-# Optimizer
+# 创建优化器 / Optimizer
 optimizer = model.setup_optimizer(unembedding_lr=args.lr, embedding_lr=args.lr, matrix_lr=args.lr, weight_decay=0.0)
 
-# Data generator (same logic as chat_sft.py)
+# 数据生成器，逻辑与 chat_sft.py 一致 / Data generator (same logic as chat_sft.py)
 row_capacity = args.max_seq_len + 1
 bos_token = tokenizer.get_bos_token_id()
 
 def data_generator():
+    """数据生成器：将对话拼接成固定长度序列，不足部分用 BOS token 填充。
+
+    从 identity 对话数据集中循环读取对话，将其渲染为 token 序列后拼接成
+    固定长度的行，用于 SFT 训练。不完整的对话会缓存到缓冲区中供下一行使用。
+
+    Data generator: concatenates conversations into fixed-length sequences,
+    padding incomplete rows with BOS tokens.
+
+    生成 / Yields:
+        (row, mask_row): 等长的 token 列表和对应的 mask 列表 / equal-length token and mask lists
+    """
     conv_buffer = []
     idx = 0
     while True:
@@ -75,6 +86,19 @@ def data_generator():
             yield row[:row_capacity], mask_row[:row_capacity]
 
 def sft_loader():
+    """SFT 数据加载器：将生成器输出组装为模型训练所需的 input/target 张量。
+
+    从 data_generator 收集一个 batch 的行，构建输入 (x) 和标签 (y) 张量。
+    对 mask 为 0 的位置，将 target 设为 -1 以在损失计算中忽略该 token。
+
+    SFT data loader: assembles generator output into input/target tensors for training.
+    Packs a batch of rows from data_generator, builds input (x) and target (y) tensors.
+    Targets at mask==0 positions are set to -1 to be ignored in loss computation.
+
+    生成 / Yields:
+        (inputs, targets): 形状为 (batch_size, seq_len) 的输入和标签张量
+                           input and target tensors of shape (batch_size, seq_len)
+    """
     rows, mask_rows = [], []
     gen = data_generator()
     while True:
@@ -94,7 +118,7 @@ def sft_loader():
 loader = sft_loader()
 x, y = next(loader)
 
-# Training
+# 训练循环 / Training
 smooth_loss = 0
 step = 0
 while step < args.num_iterations:
@@ -112,7 +136,7 @@ while step < args.num_iterations:
     if step % 10 == 0:
         print0(f"step {step:05d}/{args.num_iterations:05d} | loss: {smooth_loss/(1-0.9**step):.6f} | dt: {dt*1000:.1f}ms")
 
-# Save
+# 保存 SFT 微调后的模型检查点 / Save
 from nanochat.checkpoint_manager import save_checkpoint
 checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", f"d{model.config.n_layer}")
 save_checkpoint(checkpoint_dir, step, model.state_dict(), None, {

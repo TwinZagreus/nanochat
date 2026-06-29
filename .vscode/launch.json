@@ -1,0 +1,508 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        // =========================================================================
+        // 1. 分词器训练 (Tokenizer Training)
+        //    在 CPU 上用少量文本训练一个 BPE 分词器
+        // =========================================================================
+        {
+            "name": "1a. Tokenizer Train (CPU 小规模)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/tok_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--max-chars", "200000000",     // 2亿字符 (原是20亿)
+                "--doc-cap", "10000",
+                "--vocab-size", "16384"          // 小词表 (原是32768)
+            ]
+        },
+        {
+            "name": "1b. Tokenizer Train (CPU 极小规模/快速测试)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/tok_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--max-chars", "20000000",       // 2000万字符，几分钟跑完
+                "--doc-cap", "10000",
+                "--vocab-size", "8192"
+            ]
+        },
+        {
+            "name": "1c. Tokenizer Eval (评估分词器)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/tok_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": []
+        },
+
+        // =========================================================================
+        // 2. 基础模型预训练 (Base Model Pretraining)
+        //    使用不同规模的小模型配置，适合 CPU/MacBook
+        // =========================================================================
+        {
+            "name": "2a. Base Train - GPT-Nano (depth=2, ~4M params)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1"
+            },
+            "args": [
+                "--depth", "2",                  // 极小模型: 2层
+                "--max-seq-len", "512",          // 短序列
+                "--device-batch-size", "1",      // CPU 最小批次
+                "--total-batch-size", "32768",   // 小总批次
+                "--num-iterations", "100",       // 少量迭代
+                "--warmup-steps", "10",
+                "--eval-every", "50",
+                "--eval-tokens", "65536",
+                "--core-metric-every", "-1",     // 关闭 CORE 评估 (需要额外依赖)
+                "--sample-every", "50",
+                "--save-every", "-1",
+                "--no-compile",                  // CPU/Windows 需要
+                "--run", "dummy"
+            ]
+        },
+        {
+            "name": "2b. Base Train - GPT-Micro (depth=4, ~20M params)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1"
+            },
+            "args": [
+                "--depth", "4",
+                "--max-seq-len", "512",
+                "--device-batch-size", "1",
+                "--total-batch-size", "65536",
+                "--num-iterations", "200",
+                "--warmup-steps", "15",
+                "--eval-every", "100",
+                "--eval-tokens", "65536",
+                "--core-metric-every", "-1",
+                "--sample-every", "100",
+                "--save-every", "-1",
+                "--no-compile",
+                "--run", "dummy"
+            ]
+        },
+        {
+            "name": "2c. Base Train - GPT-Mini (depth=6, ~60M params)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1"
+            },
+            "args": [
+                "--depth", "6",
+                "--max-seq-len", "1024",
+                "--device-batch-size", "1",
+                "--total-batch-size", "131072",
+                "--num-iterations", "500",
+                "--warmup-steps", "20",
+                "--eval-every", "250",
+                "--eval-tokens", "131072",
+                "--core-metric-every", "-1",
+                "--sample-every", "250",
+                "--save-every", "-1",
+                "--no-compile",
+                "--run", "dummy"
+            ]
+        },
+        {
+            "name": "2d. Base Train - GPT-Small (depth=12, ~150M params, MacBook M3+ only)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1",
+                "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.0"  // MPS 内存管理优化
+            },
+            "args": [
+                "--depth", "12",
+                "--max-seq-len", "2048",
+                "--device-batch-size", "1",
+                "--total-batch-size", "262144",
+                "--num-iterations", "1000",
+                "--warmup-steps", "30",
+                "--eval-every", "500",
+                "--eval-tokens", "262144",
+                "--core-metric-every", "-1",
+                "--sample-every", "500",
+                "--save-every", "500",
+                "--no-compile",
+                "--run", "dummy"
+            ]
+        },
+        {
+            "name": "2e. Base Train - 从检查点恢复 (Resume)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1"
+            },
+            "args": [
+                "--depth", "4",
+                "--max-seq-len", "512",
+                "--device-batch-size", "1",
+                "--no-compile",
+                "--run", "dummy",
+                "--resume-from-step", "100"       // 从第100步恢复
+            ]
+        },
+
+        // =========================================================================
+        // 3. 基础模型评估 (Base Model Evaluation)
+        //    评估预训练模型的 loss/bpb/CORE 指标
+        // =========================================================================
+        {
+            "name": "3a. Base Eval - CORE+BPB+Sample (完整评估)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--model-tag", "dummy",           // 与训练时 --run 对应
+                "--step", "100",                  // 要评估的步数
+                "--device-type", "cpu",
+                "--device-batch-size", "4",
+                "--eval", "core,bpb,sample",
+                "--max-per-task", "10",           // 每个CORE任务只做10题
+                "--split-tokens", "65536"         // BPB 用少量 token
+            ]
+        },
+        {
+            "name": "3b. Base Eval - BPB only (快速验证perplexity)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--model-tag", "dummy",
+                "--step", "100",
+                "--device-type", "cpu",
+                "--device-batch-size", "4",
+                "--eval", "bpb",
+                "--split-tokens", "65536"
+            ]
+        },
+        {
+            "name": "3c. Base Eval - Sample only (看生成效果)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--model-tag", "dummy",
+                "--step", "100",
+                "--device-type", "cpu",
+                "--eval", "sample"
+            ]
+        },
+        {
+            "name": "3d. Base Eval - 评估 HuggingFace 模型 (如 GPT-2)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--hf-path", "openai-community/gpt2",  // 评估 HF 上的 GPT-2
+                "--device-type", "cpu",
+                "--device-batch-size", "4",
+                "--eval", "bpb",
+                "--split-tokens", "65536"
+            ]
+        },
+
+        // =========================================================================
+        // 4. SFT 监督微调 (Supervised Fine-Tuning)
+        //    在对话数据上微调预训练模型
+        // =========================================================================
+        {
+            "name": "4a. SFT Mini (离线数据, CPU小规模)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_sft_mini.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--device-batch-size", "4",
+                "--num-iterations", "200",
+                "--max-seq-len", "256",
+                "--lr", "1e-4",
+                "--run", "dummy",
+                "--eval-every", "100"
+            ]
+        },
+        {
+            "name": "4b. SFT Full (CPU 小规模, 需要预训练模型)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_sft.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1"
+            },
+            "args": [
+                "--model-tag", "dummy",           // 预训练模型 tag
+                "--model-step", "100",            // 预训练模型步数
+                "--device-type", "cpu",
+                "--device-batch-size", "1",
+                "--total-batch-size", "32768",
+                "--num-iterations", "200",
+                "--max-seq-len", "512",
+                "--load-optimizer", "0",          // CPU 内存有限，不加载优化器状态
+                "--no-compile",
+                "--eval-every", "100",
+                "--eval-tokens", "32768",
+                "--chatcore-every", "-1",         // 关闭 ChatCORE 评估
+                "--mmlu-epochs", "1",
+                "--gsm8k-epochs", "1",
+                "--run", "dummy_sft"
+            ]
+        },
+
+        // =========================================================================
+        // 5. RL 强化学习 (Reinforcement Learning / GRPO)
+        //    GSM8K 数学推理强化学习
+        // =========================================================================
+        {
+            "name": "5a. Chat RL (GSM8K GRPO, CPU 小规模)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_rl.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--model-tag", "dummy_sft",       // SFT 后的模型
+                "--model-step", "200",
+                "--device-type", "cpu",
+                "--device-batch-size", "2",
+                "--examples-per-step", "4",
+                "--num-samples", "4",             // 每题采样4次
+                "--num-epochs", "1",
+                "--max-new-tokens", "128",
+                "--temperature", "1.0",
+                "--top-k", "50",
+                "--eval-every", "30",
+                "--eval-examples", "100",
+                "--save-every", "30",
+                "--run", "dummy_rl"
+            ]
+        },
+
+        // =========================================================================
+        // 6. 对话 CLI (Interactive Chat)
+        //    在终端中与模型进行交互式对话
+        // =========================================================================
+        {
+            "name": "6a. Chat CLI (CPU 交互式对话)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_cli.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--source", "sft",
+                "--model-tag", "dummy_sft",
+                "--step", "200",
+                "--device-type", "cpu",
+                "--temperature", "0.6",
+                "--top-k", "50"
+            ]
+        },
+        {
+            "name": "6b. Chat CLI - 单次问答 (不进入交互模式)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_cli.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--source", "sft",
+                "--model-tag", "dummy_sft",
+                "--step", "200",
+                "--device-type", "cpu",
+                "--prompt", "你好，请自我介绍一下。",
+                "--temperature", "0.6"
+            ]
+        },
+
+        // =========================================================================
+        // 7. Chat Web 服务 (Web Server)
+        //    启动本地 Web 聊天服务
+        // =========================================================================
+        {
+            "name": "7a. Chat Web (CPU 单 worker)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_web.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--source", "sft",
+                "--model-tag", "dummy_sft",
+                "--step", "200",
+                "--device-type", "cpu",
+                "--num-gpus", "1",
+                "--port", "8000",
+                "--host", "127.0.0.1",
+                "--temperature", "0.8",
+                "--top-k", "50",
+                "--max-tokens", "512"
+            ]
+        },
+
+        // =========================================================================
+        // 8. Chat 评估 (Chat Evaluation)
+        //    评估对话模型的多任务能力
+        // =========================================================================
+        {
+            "name": "8a. Chat Eval - GSM8K (数学推理)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--source", "sft",
+                "--model-tag", "dummy_sft",
+                "--step", "200",
+                "--device-type", "cpu",
+                "--task-name", "gsm8k",
+                "--temperature", "0.0",
+                "--max-new-tokens", "256",
+                "--num-samples", "1",
+                "--top-k", "50",
+                "--max-problems", "10"            // 只评估10题
+            ]
+        },
+        {
+            "name": "8b. Chat Eval - 全任务 (all tasks)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/chat_eval.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--source", "sft",
+                "--model-tag", "dummy_sft",
+                "--step", "200",
+                "--device-type", "cpu",
+                "--temperature", "0.0",
+                "--max-new-tokens", "512",
+                "--batch-size", "2",
+                "--max-problems", "5"
+            ]
+        },
+
+        // =========================================================================
+        // 9. 当前文件调试 (Current File Debug)
+        //    直接调试当前打开的 Python 文件
+        // =========================================================================
+        {
+            "name": "Python: 调试当前文件",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            }
+        }
+    ]
+}

@@ -1,17 +1,22 @@
 """
-Distributed dataloaders for pretraining.
+预训练分布式数据加载器 / Distributed dataloaders for pretraining.
 
-BOS-aligned bestfit:
-   - Every row starts with BOS token
-   - Documents packed using best-fit algorithm to minimize cropping
-   - When no document fits remaining space, crops a document to fill exactly
-   - 100% utilization (no padding), ~35% tokens cropped at T=2048
+BOS对齐最佳适配算法 / BOS-aligned bestfit:
+   - 每行以BOS标记开头 / Every row starts with BOS token
+   - 使用最佳适配算法打包文档以最小化裁剪 / Documents packed using best-fit algorithm to minimize cropping
+   - 当无文档能匹配剩余空间时,裁剪一个文档来精确填充 / When no document fits remaining space, crops a document to fill exactly
+   - 100%利用率(无填充), 在T=2048时约35%的标记被裁剪 / 100% utilization (no padding), ~35% tokens cropped at T=2048
+
+与原始tokenizing_distributed_data_loader的对比:
+BOS对齐方式会损失约35%的标记,但确保训练/验证批次中"混淆"标记更少,
+因为每个标记都可以关注回BOS标记并看到文档的完整上下文。
 
 Compared to the original tokenizing_distributed_data_loader:
 BOS-aligned loses ~35% of tokens to cropping, but ensures that
 there are fewer "confusing" tokens in the train/val batches as every token can
 now attend back to the BOS token and sees the full context of the document.
 
+如果数据非常有限且文档很长,可回退到原始版本:
 Fallback to the original if you have very limited data AND long documents:
 https://github.com/karpathy/nanochat/blob/3c3a3d7/nanochat/dataloader.py#L78-L117
 """
@@ -33,10 +38,10 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
-    warn_on_legacy = ddp_rank == 0 and split == "train" # rank 0 on train split will warn on legacy
+    warn_on_legacy = ddp_rank == 0 and split == "train" # 仅rank 0在训练集上警告旧格式 / rank 0 on train split will warn on legacy
     parquet_paths = list_parquet_files(warn_on_legacy=warn_on_legacy)
-    assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"
-    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]
+    assert len(parquet_paths) != 0, "No dataset parquet files found, did you run dataset.py?"  # 未找到parquet文件,是否运行了dataset.py? / No dataset parquet files found
+    parquet_paths = parquet_paths[:-1] if split == "train" else parquet_paths[-1:]  # 训练集用除最后之外的所有文件, 验证集仅用最后一个 / train uses all but last, val uses last only
 
     resume_pq_idx = resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
     resume_rg_idx = resume_state_dict["rg_idx"] if resume_state_dict is not None else None
@@ -45,20 +50,20 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     pq_idx = resume_pq_idx
     epoch = resume_epoch
 
-    while True:  # iterate infinitely (multi-epoch)
+    while True:  # 无限迭代(多epoch) / iterate infinitely (multi-epoch)
         pq_idx = resume_pq_idx if first_pass else 0
         while pq_idx < len(parquet_paths):
             filepath = parquet_paths[pq_idx]
             pf = pq.ParquetFile(filepath)
-            # Start from resume point if resuming on same file, otherwise from DDP rank
+            # 如果在同一文件上恢复,从恢复点开始; 否则从DDP rank偏移开始 / Start from resume point if resuming on same file, otherwise from DDP rank
             if first_pass and (resume_rg_idx is not None) and (pq_idx == resume_pq_idx):
                 base_idx = resume_rg_idx // ddp_world_size
-                base_idx += 1  # advance by 1 so we don't repeat data after resuming
+                base_idx += 1  # 前进1以避免重复已恢复数据 / advance by 1 so we don't repeat data after resuming
                 rg_idx = base_idx * ddp_world_size + ddp_rank
                 if rg_idx >= pf.num_row_groups:
                     pq_idx += 1
                     continue
-                resume_rg_idx = None  # only do this once
+                resume_rg_idx = None  # 仅执行一次 / only do this once
             else:
                 rg_idx = ddp_rank
             while rg_idx < pf.num_row_groups:
@@ -79,20 +84,25 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     buffer_size=1000
 ):
     """
+    带状态的BOS对齐数据加载器,使用最佳适配裁剪(Best-Fit Cropping)。
+
+    与简单贪心裁剪相比,通过在缓冲区中搜索合适文档来减少标记浪费,
+    同时保持100%利用率(无填充)。
+
     BOS-aligned dataloader with Best-Fit Cropping.
 
     Reduces token waste compared to simple greedy cropping by searching a buffer
     for documents that fit well, while maintaining 100% utilization (no padding).
 
-    Algorithm for each row:
-    1. From buffered docs, pick the LARGEST doc that fits entirely
-    2. Repeat until no doc fits
-    3. When nothing fits, crop a doc to fill remaining space exactly
+    每行算法 / Algorithm for each row:
+    1. 从缓冲文档中选择可完整放入的最大文档 / From buffered docs, pick the LARGEST doc that fits entirely
+    2. 重复直到无文档可完整放入 / Repeat until no doc fits
+    3. 当无可完整放入的文档时,裁剪文档以精确填充剩余空间 / When nothing fits, crop a doc to fill remaining space exactly
 
-    Key properties:
-    - Every row starts with BOS
-    - 100% utilization (no padding, every token is trained on)
-    - Approximately 35% of all tokens are discarded due to cropping
+    关键属性 / Key properties:
+    - 每行以BOS开头 / Every row starts with BOS
+    - 100%利用率(无填充,每个标记都被训练) / 100% utilization (no padding, every token is trained on)
+    - 约35%的标记因裁剪而被丢弃 / Approximately 35% of all tokens are discarded due to cropping
     """
     assert split in ["train", "val"], "split must be 'train' or 'val'"
 
@@ -103,19 +113,21 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     pq_idx, rg_idx, epoch = 0, 0, 1
 
     def refill_buffer():
+        """从数据源拉取文档批次、分词、添加到缓冲区。 / Pull document batch, tokenize, append to buffer."""
         nonlocal pq_idx, rg_idx, epoch
         doc_batch, (pq_idx, rg_idx, epoch) = next(batches)
         token_lists = tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
         for tokens in token_lists:
             doc_buffer.append(tokens)
 
+    # 一次性预分配缓冲区: 布局为 [inputs (B*T) | targets (B*T)]
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
-    # This gives us contiguous views and a single HtoD transfer
+    # 提供连续视图和单次HtoD传输 / This gives us contiguous views and a single HtoD transfer
     use_cuda = device == "cuda"
-    row_buffer = torch.empty((B, row_capacity), dtype=torch.long) # for building rows without creating Python lists
-    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda) # staging area (CPU)
-    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device) # on-device buffer
-    cpu_inputs = cpu_buffer[:B * T].view(B, T) # a few views into these buffers just for convenience
+    row_buffer = torch.empty((B, row_capacity), dtype=torch.long) # 用于逐行构建,避免创建Python列表 / for building rows without creating Python lists
+    cpu_buffer = torch.empty(2 * B * T, dtype=torch.long, pin_memory=use_cuda) # CPU暂存区(pinned) / staging area (CPU)
+    gpu_buffer = torch.empty(2 * B * T, dtype=torch.long, device=device) # GPU设备缓冲区 / on-device buffer
+    cpu_inputs = cpu_buffer[:B * T].view(B, T) # 几组视图仅为方便 / a few views into these buffers just for convenience
     cpu_targets = cpu_buffer[B * T:].view(B, T)
     inputs = gpu_buffer[:B * T].view(B, T)
     targets = gpu_buffer[B * T:].view(B, T)
@@ -124,13 +136,13 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         for row_idx in range(B):
             pos = 0
             while pos < row_capacity:
-                # Ensure buffer has documents
+                # 确保缓冲区中有足够文档 / Ensure buffer has documents
                 while len(doc_buffer) < buffer_size:
                     refill_buffer()
 
-                remaining = row_capacity - pos
+                remaining = row_capacity - pos  # 当前行剩余容量 / remaining space in current row
 
-                # Find largest doc that fits entirely
+                # 找到可完整放入的最大文档 / Find largest doc that fits entirely
                 best_idx = -1
                 best_len = 0
                 for i, doc in enumerate(doc_buffer):
@@ -139,29 +151,29 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                         best_idx = i
                         best_len = doc_len
 
-                if best_idx >= 0:
+                if best_idx >= 0:  # 找到可完整放入的文档 / Found a doc that fits
                     doc = doc_buffer.pop(best_idx)
                     doc_len = len(doc)
                     row_buffer[row_idx, pos:pos + doc_len] = torch.tensor(doc, dtype=torch.long)
                     pos += doc_len
                 else:
-                    # No doc fits - crop shortest in buffer to fill remaining and minimize waste
+                    # 无文档可完整放入 - 裁剪缓冲区中最短的以最小化浪费 / No doc fits - crop shortest in buffer to fill remaining and minimize waste
                     shortest_idx = min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i]))
                     doc = doc_buffer.pop(shortest_idx)
                     row_buffer[row_idx, pos:pos + remaining] = torch.tensor(doc[:remaining], dtype=torch.long)
                     pos += remaining
 
-        # Copy to pinned CPU buffer, then single HtoD transfer
+        # 拷贝到pinned CPU缓冲区,然后单次HtoD传输 / Copy to pinned CPU buffer, then single HtoD transfer
         cpu_inputs.copy_(row_buffer[:, :-1])
         cpu_targets.copy_(row_buffer[:, 1:])
 
-        state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx, "epoch": epoch}
+        state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx, "epoch": epoch}  # 支持断点续训的状态字典 / state dict for resuming
 
-        # Single HtoD copy into persistent GPU buffer and yield
+        # 单次HtoD拷贝到持久GPU缓冲区并yield / Single HtoD copy into persistent GPU buffer and yield
         gpu_buffer.copy_(cpu_buffer, non_blocking=use_cuda)
         yield inputs, targets, state_dict
 
 def tokenizing_distributed_data_loader_bos_bestfit(*args, **kwargs):
-    """Helper that omits state_dict from yields."""
+    """简化版数据加载器: 省略yield中的state_dict,仅返回(inputs, targets)。 / Helper that omits state_dict from yields."""
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args, **kwargs):
         yield inputs, targets

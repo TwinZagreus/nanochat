@@ -1,5 +1,25 @@
 """
+基座模型统一评估脚本。
+
 Unified evaluation script for base models.
+
+支持三种评估模式（逗号分隔）：
+  --eval core    : CORE 指标（ICL 任务准确率）
+  --eval bpb     : 训练/验证集的每字节比特数
+  --eval sample  : 从模型生成样本
+
+默认运行全部三种：--eval core,bpb,sample
+
+示例：
+
+    # 使用 8 个 GPU 评估 HuggingFace 模型（如 GPT-2 124M）
+    torchrun --nproc_per_node=8 -m scripts.base_eval --hf-path openai-community/gpt2
+
+    # 使用 8 个 GPU 评估 nanochat 模型（如 d24）
+    torchrun --nproc_per_node=8 -m scripts.base_eval --model-tag d24 --device-batch-size=16
+
+    # 使用单个 GPU 进行快速/近似评估
+    python -m scripts.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100 --split-tokens=524288
 
 Supports three evaluation modes (comma-separated):
   --eval core    : CORE metric (accuracy on ICL tasks)
@@ -40,15 +60,22 @@ from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 
 # -----------------------------------------------------------------------------
+# HuggingFace 模型加载工具
 # HuggingFace loading utilities
 
 class ModelWrapper:
-    """Lightweight wrapper to give HuggingFace models a nanochat-compatible interface."""
+    """轻量包装器，为 HuggingFace 模型提供与 nanochat 兼容的接口。
+
+    Lightweight wrapper to give HuggingFace models a nanochat-compatible interface."""
     def __init__(self, model, max_seq_len=None):
         self.model = model
         self.max_seq_len = max_seq_len
 
     def __call__(self, input_ids, targets=None, loss_reduction='mean'):
+        """前向传播：返回 logits 或计算交叉熵损失。
+
+        Forward pass: return logits or compute cross-entropy loss.
+        """
         logits = self.model(input_ids).logits
         if targets is None:
             return logits
@@ -61,12 +88,17 @@ class ModelWrapper:
         return loss
 
     def get_device(self):
+        """返回模型当前所在的设备。
+
+        Return the device on which the model resides."""
         return next(self.model.parameters()).device
 
 
 def load_hf_model(hf_path: str, device):
-    """Load a HuggingFace model and tokenizer."""
-    print0(f"Loading HuggingFace model from: {hf_path}")
+    """加载 HuggingFace 模型和分词器。
+
+    Load a HuggingFace model and tokenizer."""
+    print0(f"Loading HuggingFace model from: {hf_path} / 正在从 {hf_path} 加载 HuggingFace 模型")
     from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(hf_path)
     model.to(device)
@@ -78,7 +110,9 @@ def load_hf_model(hf_path: str, device):
 
 
 def get_hf_token_bytes(tokenizer, device="cpu"):
-    """Compute token_bytes tensor for a HuggingFace tokenizer."""
+    """为 HuggingFace 分词器计算 token_bytes 张量（每个 token 的 UTF-8 字节数）。
+
+    Compute token_bytes tensor for a HuggingFace tokenizer."""
     vocab_size = tokenizer.tokenizer.get_vocab_size()
     token_bytes = torch.zeros(vocab_size, dtype=torch.int64, device=device)
     for token_id in range(vocab_size):
@@ -87,13 +121,16 @@ def get_hf_token_bytes(tokenizer, device="cpu"):
     return token_bytes
 
 # -----------------------------------------------------------------------------
+# CORE 评估
 # CORE evaluation
 
 EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
 
 
 def place_eval_bundle(file_path):
-    """Unzip eval_bundle.zip and place it in the base directory."""
+    """解压 eval_bundle.zip 并将其放置到基础目录中。
+
+    Unzip eval_bundle.zip and place it in the base directory."""
     base_dir = get_base_dir()
     eval_bundle_dir = os.path.join(base_dir, "eval_bundle")
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -101,16 +138,20 @@ def place_eval_bundle(file_path):
             zip_ref.extractall(tmpdir)
         extracted_bundle_dir = os.path.join(tmpdir, "eval_bundle")
         shutil.move(extracted_bundle_dir, eval_bundle_dir)
-    print0(f"Placed eval_bundle directory at {eval_bundle_dir}")
+    print0(f"Placed eval_bundle directory at {eval_bundle_dir} / eval_bundle 目录已放置到 {eval_bundle_dir}")
 
 
 def evaluate_core(model, tokenizer, device, max_per_task=-1):
     """
+    在 CORE 基准上评估基座模型。
+    返回包含 results（原始准确率）、centered_results（中心化准确率）和 core_metric 的字典。
+
     Evaluate a base model on the CORE benchmark.
     Returns dict with results, centered_results, and core_metric.
     """
     base_dir = get_base_dir()
     eval_bundle_dir = os.path.join(base_dir, "eval_bundle")
+    # 如有需要则下载评估数据包
     # Download the eval bundle if needed
     if not os.path.exists(eval_bundle_dir):
         download_file_with_lock(EVAL_BUNDLE_URL, "eval_bundle.zip", postprocess_fn=place_eval_bundle)
@@ -123,6 +164,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
         config = yaml.safe_load(f)
     tasks = config['icl_tasks']
 
+    # 加载随机基线值（各任务随机猜测的预期准确率）
     # Load random baseline values
     random_baselines = {}
     with open(eval_meta_data, 'r', encoding='utf-8') as f:
@@ -132,6 +174,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
             random_baseline = row['Random baseline']
             random_baselines[task_name] = float(random_baseline)
 
+    # 评估每个任务
     # Evaluate each task
     results = {}
     centered_results = {}
@@ -150,6 +193,7 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
         with open(data_path, 'r', encoding='utf-8') as f:
             data = [json.loads(line.strip()) for line in f]
 
+        # 打乱以在使用 max_per_task 时进行一致的子采样
         # Shuffle for consistent subsampling when using max_per_task
         shuffle_rng = random.Random(1337)
         shuffle_rng.shuffle(data)
@@ -173,20 +217,26 @@ def evaluate_core(model, tokenizer, device, max_per_task=-1):
     return out
 
 # -----------------------------------------------------------------------------
+# 主入口
 # Main
 
 def main():
-    parser = argparse.ArgumentParser(description="Base model evaluation")
-    parser.add_argument('--eval', type=str, default='core,bpb,sample', help='Comma-separated evaluations to run: core,bpb,sample (default: all)')
-    parser.add_argument('--hf-path', type=str, default=None, help='HuggingFace model path (e.g. openai-community/gpt2-xl)')
-    parser.add_argument('--model-tag', type=str, default=None, help='nanochat model tag to identify the checkpoint directory')
-    parser.add_argument('--step', type=int, default=None, help='Model step to load (default = last)')
-    parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per CORE task (-1 = all)')
-    parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation')
-    parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB')
-    parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect)')
+    """基座模型评估的主入口函数。解析命令行参数，加载模型，并运行指定的评估模式。
+
+    Main entry point for base model evaluation. Parses CLI arguments, loads the model, and runs specified evaluation modes.
+    """
+    parser = argparse.ArgumentParser(description="Base model evaluation / 基座模型评估")
+    parser.add_argument('--eval', type=str, default='core,bpb,sample', help='Comma-separated evaluations to run: core,bpb,sample (default: all) / 要运行的评估列表（逗号分隔）：core,bpb,sample（默认：全部）')
+    parser.add_argument('--hf-path', type=str, default=None, help='HuggingFace model path (e.g. openai-community/gpt2-xl) / HuggingFace 模型路径（如 openai-community/gpt2-xl）')
+    parser.add_argument('--model-tag', type=str, default=None, help='nanochat model tag to identify the checkpoint directory / 用于标识检查点目录的 nanochat 模型标签')
+    parser.add_argument('--step', type=int, default=None, help='Model step to load (default = last) / 要加载的模型步数（默认 = 最后一步）')
+    parser.add_argument('--max-per-task', type=int, default=-1, help='Max examples per CORE task (-1 = all) / CORE 任务每个最多使用的样本数（-1 = 全部）')
+    parser.add_argument('--device-batch-size', type=int, default=32, help='Per-device batch size for BPB evaluation / BPB 评估时每个设备的批次大小')
+    parser.add_argument('--split-tokens', type=int, default=40*524288, help='Number of tokens to evaluate per split for BPB / BPB 评估中每个数据集分割使用的 token 数')
+    parser.add_argument('--device-type', type=str, default='', help='cuda|cpu|mps (empty = autodetect) / 设备类型（空=自动检测）')
     args = parser.parse_args()
 
+    # 解析评估模式
     # Parse evaluation modes
     eval_modes = set(mode.strip() for mode in args.eval.split(','))
     valid_modes = {'core', 'bpb', 'sample'}
@@ -194,9 +244,11 @@ def main():
     if invalid:
         parser.error(f"Invalid eval modes: {invalid}. Valid: {valid_modes}")
 
+    # 分布式 / 精度设置
     # Distributed / precision setup
     device_type = autodetect_device_type() if args.device_type == '' else args.device_type
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+    # 加载模型和分词器
     # Load model and tokenizer
     is_hf_model = args.hf_path is not None
     if is_hf_model:
@@ -212,19 +264,21 @@ def main():
         model_name = f"base_model (step {meta['step']})"
         model_slug = f"base_model_{meta['step']:06d}"
 
-    print0(f"Evaluating model: {model_name}")
-    print0(f"Eval modes: {', '.join(sorted(eval_modes))}")
+    print0(f"Evaluating model: {model_name} / 正在评估模型：{model_name}")
+    print0(f"Eval modes: {', '.join(sorted(eval_modes))} / 评估模式：{', '.join(sorted(eval_modes))}")
 
+    # 待记录的结果
     # Results to log
     core_results = None
     bpb_results = {}
     samples = []
     unconditioned_samples = []
 
+    # --- 采样 ---
     # --- Sampling ---
     if 'sample' in eval_modes and not is_hf_model:
         print0("\n" + "="*80)
-        print0("Model Samples")
+        print0("Model Samples / 模型采样")
         print0("="*80)
         if ddp_rank == 0:
             prompts = [
@@ -237,7 +291,7 @@ def main():
                 "If 5*x + 3 = 13, then x is",
             ]
             engine = Engine(model, tokenizer)
-            print0("\nConditioned samples:")
+            print0("\nConditioned samples: / 带条件采样：")
             for prompt in prompts:
                 tokens = tokenizer(prompt, prepend="<|bos|>")
                 sample, _ = engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
@@ -246,7 +300,7 @@ def main():
                 print0(sample_str)
                 samples.append(sample_str)
 
-            print0("\nUnconditioned samples:")
+            print0("\nUnconditioned samples: / 无条件采样：")
             tokens = tokenizer("", prepend="<|bos|>")
             uncond, _ = engine.generate_batch(tokens, num_samples=8, max_tokens=128, temperature=1.0)
             for sample in uncond:
@@ -255,18 +309,20 @@ def main():
                 print0(sample_str)
                 unconditioned_samples.append(sample_str)
     elif 'sample' in eval_modes and is_hf_model:
-        print0("\nSkipping sampling for HuggingFace models (not supported)")
+        print0("\nSkipping sampling for HuggingFace models (not supported) / 跳过 HuggingFace 模型的采样（不支持）")
 
+    # --- BPB 评估 ---
     # --- BPB evaluation ---
     if 'bpb' in eval_modes:
         print0("\n" + "="*80)
-        print0("BPB Evaluation")
+        print0("BPB Evaluation / BPB 评估")
         print0("="*80)
         tokens_per_step = args.device_batch_size * sequence_len * ddp_world_size
         if args.split_tokens % tokens_per_step != 0:
+            # 调整为最近的整数倍
             # Adjust to nearest multiple
             args.split_tokens = (args.split_tokens // tokens_per_step) * tokens_per_step
-            print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step})")
+            print0(f"Adjusted split_tokens to {args.split_tokens} (must be divisible by {tokens_per_step}) / split_tokens 已调整为 {args.split_tokens}（必须能被 {tokens_per_step} 整除）")
         steps = args.split_tokens // tokens_per_step
 
         for split_name in ["train", "val"]:
@@ -275,13 +331,15 @@ def main():
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb: {bpb:.6f}")
 
+    # --- CORE 评估 ---
     # --- CORE evaluation ---
     if 'core' in eval_modes:
         print0("\n" + "="*80)
-        print0("CORE Evaluation")
+        print0("CORE Evaluation / CORE 评估")
         print0("="*80)
         core_results = evaluate_core(model, tokenizer, device, max_per_task=args.max_per_task)
 
+        # 输出 CSV 文件
         # Write CSV output
         if ddp_rank == 0:
             base_dir = get_base_dir()
@@ -294,9 +352,10 @@ def main():
                     centered = core_results["centered_results"][label]
                     f.write(f"{label:<35}, {acc:<10.6f}, {centered:<10.6f}\n")
                 f.write(f"{'CORE':<35}, {'':<10}, {core_results['core_metric']:<10.6f}\n")
-            print0(f"\nResults written to: {output_csv_path}")
+            print0(f"\nResults written to: {output_csv_path} / 结果已写出到：{output_csv_path}")
             print0(f"CORE metric: {core_results['core_metric']:.4f}")
 
+    # --- 记录到报告 ---
     # --- Log to report ---
     from nanochat.report import get_report
     report_data = [{"model": model_name}]
@@ -314,7 +373,7 @@ def main():
     if unconditioned_samples:
         report_data.append({f"unconditioned {i}": s for i, s in enumerate(unconditioned_samples)})
 
-    get_report().log(section="Base model evaluation", data=report_data)
+    get_report().log(section="Base model evaluation / 基座模型评估", data=report_data)
 
     compute_cleanup()
 
