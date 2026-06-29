@@ -1,9 +1,11 @@
 """
 Functions for evaluating the CORE metric, as described in the DCLM paper.
 https://arxiv.org/abs/2406.11794
+CORE 评估: DCLM论文标准基准，测试模型的综合语言能力。
+三种任务类型: multiple_choice(多选题), schema, language_modeling(语言建模)
+评估流程: 渲染prompt → 批处理token序列 → forward_model → 找最低loss选项或比较预测token
 
-TODOs:
-- All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
+TODOs: All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
 """
 import random
 
@@ -145,7 +147,9 @@ def batch_sequences_lm(tokenizer, prompts):
 def forward_model(model, input_ids):
     """
     Take BxT tensor of token ids, return BxT tensor of losses and argmax predictions.
+    前向传播: 输入(B,T)token ids → 输出(B,T)逐位置交叉熵损失 + 逐位置argmax预测
     The last column of losses is set to nan because we don't have autoregressive targets there.
+    最后一列设为nan(没有自回归目标→无法计算损失)
     """
     batch_size, seq_len = input_ids.size()
     outputs = model(input_ids)

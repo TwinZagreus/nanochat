@@ -1,8 +1,14 @@
 """
 Base class for all Tasks.
+Task 基类: 对话数据集的抽象，提供切片/评估/奖励统一接口。
+
 A Task is basically a dataset of conversations, together with some
 metadata and often also evaluation criteria.
+每个Task = 对话列表 + 元数据 + evaluate(评估)+ reward(RL奖励)
+
 Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
+衍生类: TaskMixture(多任务随机混合，支持重复传入→过采样)
+       TaskSequence(顺序训练，curriculum learning用)
 """
 
 import random

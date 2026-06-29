@@ -266,9 +266,14 @@ class RustBPETokenizer:
     def render_conversation(self, conversation, max_tokens=2048):
         """
         Tokenize a single Chat conversation (which we call a "doc" or "document" here).
+        将对话渲染为token序列+训练mask——SFT最关键的预处理步骤。
+        mask=1: Assistant输出部分(参与损失)，mask=0: 用户消息/系统提示/特殊标记/工具输出(被忽略)
+
         Returns:
         - ids: list[int] is a list of token ids of this rendered conversation
         - mask: list[int] of same length, mask = 1 for tokens that the Assistant is expected to train on.
+        格式: [BOS|<user_start>|文本|<user_end>|<assistant_start>|回复|<assistant_end>]×N
+               mask= 0   0           0       0         0               1       1
         """
         # ids, masks that we will return and a helper function to help build them up.
         ids, mask = [], []

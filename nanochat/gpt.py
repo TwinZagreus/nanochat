@@ -10,6 +10,23 @@ Notable features:
 - no bias in linear layers
 - Group-Query Attention (GQA) support for more efficient inference
 - Flash Attention 3 integration
+
+============================================================================
+nanochat 核心模块：GPT Transformer 语言模型。
+============================================================================
+架构亮点:
+  - RoPE 旋转位置编码（无学习参数，Q/K上施加旋转变换）
+  - QK 归一化（稳定注意力训练）
+  - Untied Weights（词嵌入和输出投射不共享权重）
+  - ReLU² 激活（比GeLU更简单，效果相当）
+  - Post-embedding Norm（嵌入后立即归一化）
+  - RMSNorm 无可学习参数，Linear 无偏置
+  - GQA 支持（KV头数可少于Q头数，节省推理显存）
+  - FA3 集成（H100+ 自动启用，其他GPU SDPA回退）
+
+关键设计: 权重存FP32（优化器精度），前向时自定义Linear自动转为 COMPUTE_DTYPE
+         嵌入直接存 COMPUTE_DTYPE（省显存），fp16例外（GradScaler不能缩放fp16嵌入梯度）
+============================================================================
 """
 
 from functools import partial
@@ -23,59 +40,79 @@ from nanochat.common import get_dist_info, print0, COMPUTE_DTYPE
 from nanochat.optim import MuonAdamW, DistMuonAdamW
 
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
+# 统一Flash Attention接口：Hopper GPU → FA3 kernel，其他 → PyTorch SDPA自动回退
 from nanochat.flash_attention import flash_attn
 
+# ============================================================================
+# GPTConfig: 模型配置（通过 --depth 一个旋钮推导所有超参数）
+# model_dim = depth × aspect_ratio(64), n_head = model_dim / head_dim(128)
+# ============================================================================
 @dataclass
 class GPTConfig:
-    sequence_len: int = 2048
-    vocab_size: int = 32768
-    n_layer: int = 12
-    n_head: int = 6 # number of query heads
-    n_kv_head: int = 6 # number of key/value heads (GQA)
-    n_embd: int = 768
+    sequence_len: int = 2048  # 最大上下文长度
+    vocab_size: int = 32768   # 词表大小 = 2^15，BPE分词器token数
+    n_layer: int = 12         # Transformer层数（唯一手动指定的核心参数）
+    n_head: int = 6           # number of query heads，Q注意力头数
+    n_kv_head: int = 6        # number of key/value heads (GQA)，KV头数（<n_head时启用GQA）
+    n_embd: int = 768         # 嵌入维度 = depth × aspect_ratio
     # Sliding window attention pattern string, tiled across layers. Final layer always L.
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
+    # 滑动窗口模式: L=完整上下文(seq_len), S=短窗口(seq_len/4)，层间循环平铺，最后一层始终L
     window_pattern: str = "SSSL"
 
 
 def norm(x):
+    """RMS 归一化（无仿射变换参数）。x / sqrt(mean(x²))，比LayerNorm去掉了平移和缩放"""
     return F.rms_norm(x, (x.size(-1),)) # note that this will run in bf16, seems ok
 
+# ============================================================================
+# Linear: 自定义线性层——混合精度的核心
+# 权重存FP32 → 前向时 cast 到输入激活的 dtype → 矩阵乘法在低精度下运行
+# 效果 = autocast的混合精度，但完全显式可控
+# ============================================================================
 class Linear(nn.Linear):
     """nn.Linear that casts weights to match input dtype in forward.
     Replaces autocast: master weights stay fp32 for optimizer precision,
-    but matmuls run in the activation dtype (typically bf16 from embeddings)."""
+    but matmuls run in the activation dtype (typically bf16 from embeddings).
+    替代 torch.amp.autocast: 主权重FP32存储 → 优化器精度 → 前向自动转bf16做matmul"""
     def forward(self, x):
         return F.linear(x, self.weight.to(dtype=x.dtype))
 
 
 def has_ve(layer_idx, n_layer):
-    """Returns True if GPT layer should have Value Embedding (alternating, last layer always included)."""
+    """Returns True if GPT layer should have Value Embedding (alternating, last layer always included).
+    判断某层是否启用Value Embedding: 交替层+最后一层必启用"""
     return layer_idx % 2 == (n_layer - 1) % 2
 
 def apply_rotary_emb(x, cos, sin):
+    """RoPE旋转位置编码: 每对维度视为2D点，按位置旋转，使Q·K内积自动包含相对位置信息"""
     assert x.ndim == 4  # multihead attention
     d = x.shape[3] // 2
-    x1, x2 = x[..., :d], x[..., d:] # split up last dim into two halves
-    y1 = x1 * cos + x2 * sin # rotate pairs of dims
-    y2 = x1 * (-sin) + x2 * cos
+    x1, x2 = x[..., :d], x[..., d:] # split up last dim into two halves 对半分
+    y1 = x1 * cos + x2 * sin # rotate pairs of dims 顺时针旋转
+    y2 = x1 * (-sin) + x2 * cos  # 逆时针旋转
     return torch.cat([y1, y2], 3)
 
+# ============================================================================
+# CausalSelfAttention: 因果自注意力层 — Transformer的核心计算
+# 流程: x→Linear投射Q/K/V → 可选VE门控注入 → RoPE → QK Norm → Flash Attention → 输出投射
+# ============================================================================
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
         self.layer_idx = layer_idx
-        self.n_head = config.n_head
-        self.n_kv_head = config.n_kv_head
+        self.n_head = config.n_head              # Q头数
+        self.n_kv_head = config.n_kv_head        # KV头数（GQA时< n_head）
         self.n_embd = config.n_embd
-        self.head_dim = self.n_embd // self.n_head
+        self.head_dim = self.n_embd // self.n_head  # 每头维度 = C / n_head
         assert self.n_embd % self.n_head == 0
-        assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
+        assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0  # GQA约束
         self.c_q = Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
         self.c_k = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_proj = Linear(self.n_embd, self.n_embd, bias=False)
+        self.c_proj = Linear(self.n_embd, self.n_embd, bias=False)  # 输出投射（零初始化）
+        # Value Embedding门控（ResFormer风格）: 取输入前12维 → Linear → sigmoid×3 → 范围(0,3)
         self.ve_gate_channels = 12
         self.ve_gate = Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
@@ -414,9 +451,16 @@ class GPT(nn.Module):
         return optimizer
 
     def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+        """
+        GPT前向传播——训练和推理的统一入口。7步流程:
+          ① RoPE缓存验证+动态扩展  ② 词嵌入+归一化+精度对齐
+          ③ Smear(前一token嵌入泄漏) ④ 逐层Transformer处理(x0混合→resid缩放→VE注入→Block)
+          ⑤ Backout(减去中层残差)   ⑥ 最终归一化→lm_head→logit softcap
+          ⑦ loss(训练) 或 logits(推理)
+        """
         B, T = idx.size()
 
-        # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
+        # ① RoPE: grab the rotary embeddings, dynamically expand if needed (e.g. eval prompts)
         # Dynamically expand the rotary cache if the sequence is longer than expected (e.g. eval prompts)
         if T > self.cos.size(1):
             head_dim = self.config.n_embd // self.config.n_head
@@ -427,20 +471,21 @@ class GPT(nn.Module):
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == COMPUTE_DTYPE, f"Rotary embeddings must be in {COMPUTE_DTYPE}, got {self.cos.dtype}"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
-        T0 = 0 if kv_cache is None else kv_cache.get_pos()
+        T0 = 0 if kv_cache is None else kv_cache.get_pos()  # KV缓存推理时需偏移到当前缓存位置
         cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
 
-        # Embed the tokens
+        # ② Embed the tokens: 查表 → 转精度 → 归一化
         x = self.transformer.wte(idx) # embed current token
         x = x.to(COMPUTE_DTYPE) # ensure activations are in compute dtype (no-op usually, but active for fp16 code path)
         x = norm(x)
 
-        # Smear: mix previous token's embedding into current position (cheap bigram info)
+        # ③ Smear: mix previous token's embedding into current position (cheap bigram info)
+        # gate = λ·σ(W·x_t[:24]) ∈ (0,λ)，将位置t-1的嵌入混入位置t
         if kv_cache is None:
             # Training / naive generate: full sequence available, use fast slice
             assert T > 1, "Training forward pass should have T > 1"
             gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
-            x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
+            x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)  # x_t += gate_t × x_{t-1}
         else:
             # KV cache inference: read prev embedding from cache, store current for next step
             x_pre_smear = kv_cache.prev_embedding
@@ -454,32 +499,35 @@ class GPT(nn.Module):
                 gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, :, :24]))
                 x = x + gate * x_pre_smear
 
-        # Forward the trunk of the Transformer
-        x0 = x  # save initial normalized embedding for x0 residual
+        # ④ Forward the trunk of the Transformer: 逐层通过N个Block
+        x0 = x  # save initial normalized embedding for x0 residual，保存初始嵌入供逐层混合
         n_layer = self.config.n_layer
-        backout_layer = n_layer // 2  # cache at halfway point
+        backout_layer = n_layer // 2  # cache at halfway point，在中点层缓存残差
         x_backout = None
         for i, block in enumerate(self.transformer.h):
+            # resid_lambda缩放残差 + x0_lambda混入初始嵌入
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
+            # Value Embedding注入（仅交替层 + 最后一层）
             ve = self.value_embeds[str(i)](idx).to(x.dtype) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i], kv_cache)
             if i == backout_layer:
-                x_backout = x
-        # Subtract mid-layer residual to remove low-level features before logit projection
+                x_backout = x  # 缓存中点残差供backout使用
+        # ⑤ Subtract mid-layer residual to remove low-level features before logit projection
+        # 减去中层残差，移除拼写/词法级底层特征→让lm_head看到更高层语义
         if x_backout is not None:
             x = x - self.backout_lambda.to(x.dtype) * x_backout
         x = norm(x)
 
-        # Forward the lm_head (compute logits)
-        softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
+        # ⑥ Forward the lm_head (compute logits) + softcap平滑截断
+        softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]，将logits截断到[-15,15]
         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
-        logits = logits[..., :self.config.vocab_size] # slice to remove padding
-        logits = logits.float() # switch to fp32 for logit softcap and loss computation
-        logits = softcap * torch.tanh(logits / softcap) # squash the logits
+        logits = logits[..., :self.config.vocab_size] # slice to remove padding，切掉填充部分
+        logits = logits.float() # switch to fp32 for logit softcap and loss computation，转FP32保证数值稳定
+        logits = softcap * torch.tanh(logits / softcap) # squash the logits，平滑截断
 
+        # ⑦ 损失(训练)或返回logits(推理)
         if targets is not None:
             # training: given the targets, compute and return the loss
-            # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:
@@ -489,7 +537,8 @@ class GPT(nn.Module):
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):
         """
-        Naive autoregressive streaming inference.
+        Naive autoregressive streaming inference (batch=1, 无KV Cache, 用于参考/调试).
+        朴素自回归流式生成: 每步→forward→取最后位置logits→采样→yield token→拼接到序列→循环
         To make it super simple, let's assume:
         - batch size is 1
         - ids and the yielded tokens are simple Python lists and ints
@@ -503,16 +552,16 @@ class GPT(nn.Module):
         ids = torch.tensor([tokens], dtype=torch.long, device=device) # add batch dim
         for _ in range(max_tokens):
             logits = self.forward(ids) # (B, T, vocab_size)
-            logits = logits[:, -1, :] # (B, vocab_size)
+            logits = logits[:, -1, :] # (B, vocab_size) — 只取最后位置的logits
             if top_k is not None and top_k > 0:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))  # 找出第k大的作为阈值
+                logits[logits < v[:, [-1]]] = -float('Inf')  # 低于阈值的→概率=0
             if temperature > 0:
                 logits = logits / temperature
                 probs = F.softmax(logits, dim=-1)
                 next_ids = torch.multinomial(probs, num_samples=1, generator=rng)
             else:
-                next_ids = torch.argmax(logits, dim=-1, keepdim=True)
+                next_ids = torch.argmax(logits, dim=-1, keepdim=True)  # 贪婪解码
             ids = torch.cat((ids, next_ids), dim=1)
             token = next_ids.item()
             yield token

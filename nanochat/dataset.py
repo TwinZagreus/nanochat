@@ -1,10 +1,13 @@
 """
 The base/pretraining dataset is a set of parquet files.
+预训练数据集: ClimbMix-400B (HuggingFace S3托管)，parquet格式存储。
+
 This file contains utilities for:
-- iterating over the parquet files and yielding documents from it
-- download the files on demand if they are not on disk
+- 遍历parquet文件流式读取文档
+- 按需从HF/S3下载分片 (多进程并行，指数退避重试)
 
 For details of how the dataset was prepared, see `repackage_data_reference.py`.
+每个分片 ~100MB 压缩文本，共6542个训练分片 + 1个验证分片(shard_06542)
 """
 
 import os

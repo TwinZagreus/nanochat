@@ -1,5 +1,11 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
+检查点管理: 模型保存/加载、断点续训、向后兼容补丁。
+
+文件命名:
+  model_005000.pt      — 模型参数 (torch.save)
+  optim_005000_rank0.pt — 优化器状态 (每rank一个，分布式时各rank独立存储)
+  meta_005000.json      — 元数据 (配置、步数、数据加载器状态、循环状态)
 """
 import os
 import re
@@ -7,34 +13,35 @@ import glob
 import json
 import logging
 import torch
-
 from nanochat.common import get_base_dir
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.tokenizer import get_tokenizer
 from nanochat.common import setup_default_logging
 
-# Set up logging
 setup_default_logging()
 logger = logging.getLogger(__name__)
 def log0(message):
+    """仅rank 0打印日志(分布式训练时避免重复输出)"""
     if int(os.environ.get('RANK', 0)) == 0:
         logger.info(message)
 
 def _patch_missing_config_keys(model_config_kwargs):
-    """Add default values for new config keys missing in old checkpoints."""
+    """Add default values for new config keys missing in old checkpoints.
+    向后兼容: 旧检查点缺少新增的配置键时自动补默认值"""
     # Old models were trained with full context (no sliding window)
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
         log0(f"Patching missing window_pattern in model config to 'L'")
 
 def _patch_missing_keys(model_data, model_config):
-    """Add default values for new parameters that may be missing in old checkpoints."""
+    """Add default values for new parameters that may be missing in old checkpoints.
+    向后兼容: 旧模型权重缺少新增参数时自动创建默认值"""
     n_layer = model_config.n_layer
-    # resid_lambdas defaults to 1.0 (identity scaling)
+    # resid_lambdas defaults to 1.0 (identity scaling)，残差缩放默认为1(=无缩放)
     if "resid_lambdas" not in model_data:
         model_data["resid_lambdas"] = torch.ones(n_layer)
         log0(f"Patching missing resid_lambdas in model data to 1.0")
-    # x0_lambdas defaults to 0.0 (disabled)
+    # x0_lambdas defaults to 0.0 (disabled)，初始嵌入混合默认为0(=不混合)
     if "x0_lambdas" not in model_data:
         model_data["x0_lambdas"] = torch.zeros(n_layer)
         log0(f"Patching missing x0_lambdas in model data to 0.0")
@@ -76,61 +83,67 @@ def load_checkpoint(checkpoint_dir, step, device, load_optimizer=False, rank=0):
 
 def build_model(checkpoint_dir, step, device, phase):
     """
-    A bunch of repetitive code to build a model from a given checkpoint.
-    Returns:
-    - base model - uncompiled, not wrapped in DDP
-    - tokenizer
-    - meta data saved during base model training
+    从检查点构建完整模型 (加载参数 + 分词器 + 元数据)。
+
+    流程:
+      ① 加载 model_{step}.pt + meta_{step}.json
+      ② CPU/MPS 时 bf16→fp32 转换
+      ③ 修复 torch.compile 的 _orig_mod. 前缀
+      ④ 向后兼容补丁 (_patch_missing_*)
+      ⑤ 在 meta device 上构建模型外壳 → to_empty 分配显存 → init_weights 初始化
+      ⑥ load_state_dict 覆盖为保存的权重
+      ⑦ 加载分词器 → 验证词表大小一致
+
+    Returns: (model, tokenizer, meta_data)
+      - model: 未编译、未包装DDP的原始模型
+      - tokenizer: RustBPETokenizer 实例
+      - meta_data: 训练时保存的元数据字典
     """
     assert phase in ["train", "eval"], f"Invalid phase: {phase}"
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, step, device, load_optimizer=False)
     if device.type in {"cpu", "mps"}:
-        # Convert bfloat16 tensors to float for CPU inference
+        # Convert bfloat16 tensors to float for CPU inference (CPU不支持bf16)
         model_data = {
             k: v.float() if v.dtype == torch.bfloat16 else v
             for k, v in model_data.items()
         }
     # Hack: fix torch compile issue, which prepends all keys with _orig_mod.
+    # torch.compile 会在 state_dict 的 key 前加 "_orig_mod." 前缀，去掉以匹配模型
     model_data = {k.removeprefix("_orig_mod."): v for k, v in model_data.items()}
     model_config_kwargs = meta_data["model_config"]
-    _patch_missing_config_keys(model_config_kwargs)
+    _patch_missing_config_keys(model_config_kwargs)  # 补旧检查点缺失的配置键
     log0(f"Building model with config: {model_config_kwargs}")
     model_config = GPTConfig(**model_config_kwargs)
-    _patch_missing_keys(model_data, model_config)
+    _patch_missing_keys(model_data, model_config)  # 补旧检查点缺失的参数
+    # meta device: 只定义形状/类型，不分配显存 → to_empty 再分配 → init_weights 初始化
     with torch.device("meta"):
         model = GPT(model_config)
-    # Load the model state
-    model.to_empty(device=device)
-    model.init_weights() # note: this is dumb, but we need to init the rotary embeddings. TODO: fix model re-init
-    model.load_state_dict(model_data, strict=True, assign=True)
-    # Put the model in the right training phase / mode
-    if phase == "eval":
-        model.eval()
-    else:
-        model.train()
-    # Load the Tokenizer
+    model.to_empty(device=device)  # 分配未初始化的显存
+    model.init_weights()  # 初始化全部参数（会被 load_state_dict 覆盖）
+    model.load_state_dict(model_data, strict=True, assign=True)  # 覆盖为保存的权重
+    if phase == "eval": model.eval()
+    else: model.train()
     tokenizer = get_tokenizer()
-    # Sanity check: compatibility between model and tokenizer
-    assert tokenizer.get_vocab_size() == model_config_kwargs["vocab_size"], f"Tokenizer vocab size {tokenizer.get_vocab_size()} does not match model config vocab size {model_config_kwargs['vocab_size']}"
+    # 词表一致性校验
+    assert tokenizer.get_vocab_size() == model_config_kwargs["vocab_size"]
     return model, tokenizer, meta_data
 
 
 def find_largest_model(checkpoints_dir):
-    # attempt to guess the model tag: take the biggest model available
+    """自动选择最大的模型: 先匹配 d<数字> 取最大depth，失败则取最近更新的目录。"""
     model_tags = [f for f in os.listdir(checkpoints_dir) if os.path.isdir(os.path.join(checkpoints_dir, f))]
     if not model_tags:
         raise FileNotFoundError(f"No checkpoints found in {checkpoints_dir}")
-    # 1) normally all model tags are of the form d<number>, try that first:
+    # 1) 目录名符合 d<number> 格式: 按depth排序取最大
     candidates = []
     for model_tag in model_tags:
         match = re.match(r"d(\d+)", model_tag)
         if match:
-            model_depth = int(match.group(1))
-            candidates.append((model_depth, model_tag))
+            candidates.append((int(match.group(1)), model_tag))
     if candidates:
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        candidates.sort(key=lambda x: x[0], reverse=True)  # depth降序
         return candidates[0][1]
-    # 2) if that failed, take the most recently updated model:
+    # 2) 都不符合: 取最近修改时间的目录
     model_tags.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoints_dir, x)), reverse=True)
     return model_tags[0]
 

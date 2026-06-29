@@ -17,6 +17,11 @@ from filelock import FileLock
 # Override with NANOCHAT_DTYPE env var: "bfloat16", "float16", "float32"
 _DTYPE_MAP = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 def _detect_compute_dtype():
+    """
+    自动检测计算精度(模块加载时运行一次，结果存 COMPUTE_DTYPE 全局变量)。
+    优先级: NANOCHAT_DTYPE环境变量 > GPU SM版本检测 > 默认fp32(CPU/MPS)
+    SM≥8.0(H100/A100)→bf16, SM<8.0(GTX1630/V100/T4)→fp32, 无CUDA→fp32
+    """
     env = os.environ.get("NANOCHAT_DTYPE")
     if env is not None:
         return _DTYPE_MAP[env], f"set via NANOCHAT_DTYPE={env}"

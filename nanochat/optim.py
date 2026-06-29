@@ -52,19 +52,22 @@ def adamw_step_fused(
     Fused AdamW step: weight_decay -> momentum_update -> bias_correction -> param_update
     All in one compiled graph to eliminate Python overhead between ops.
     The 0-D CPU tensors avoid recompilation when hyperparameter values change.
+    算法公式: p *= (1-lr×wd) → m = β₁·m+(1-β₁)·∇L → v = β₂·v+(1-β₂)·∇L²
+             → 偏差校正 m̂=m/(1-β₁ᵗ), v̂=v/(1-β₂ᵗ) → p -= η×m̂/(√v̂+ε)
+    0-D CPU tensor: 值变形状不变 → torch.compile 复用已编译的图
     """
-    # Weight decay (decoupled, applied before the update)
+    # Weight decay (decoupled, applied before the update)，解耦式: 直接衰减参数而非通过梯度
     p.mul_(1 - lr_t * wd_t)
     # Update running averages (lerp_ is cleaner and fuses well)
-    exp_avg.lerp_(grad, 1 - beta1_t)
-    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)
-    # Bias corrections
-    bias1 = 1 - beta1_t ** step_t
+    exp_avg.lerp_(grad, 1 - beta1_t)     # m = β₁·m + (1-β₁)·grad
+    exp_avg_sq.lerp_(grad.square(), 1 - beta2_t)  # v = β₂·v + (1-β₂)·grad²
+    # Bias corrections: 修正初始阶段矩估计偏低问题
+    bias1 = 1 - beta1_t ** step_t  # →1 as t→∞
     bias2 = 1 - beta2_t ** step_t
     # Compute update and apply
-    denom = (exp_avg_sq / bias2).sqrt() + eps_t
-    step_size = lr_t / bias1
-    p.add_(exp_avg / denom, alpha=-step_size)
+    denom = (exp_avg_sq / bias2).sqrt() + eps_t  # √v̂+ε
+    step_size = lr_t / bias1                       # η/(1-β₁ᵗ)
+    p.add_(exp_avg / denom, alpha=-step_size)      # p -= η × m̂/(√v̂+ε)
 
 # -----------------------------------------------------------------------------
 """
@@ -122,9 +125,12 @@ def muon_step_fused(
     Fused Muon step: momentum -> polar_express -> variance_reduction -> cautious_update
     All in one compiled graph to eliminate Python overhead between ops.
     Some of the constants are 0-D CPU tensors to avoid recompilation when values change.
+    四步流程: ① Nesterov动量 → ② Polar Express正交化(梯度矩阵→近似正交矩阵)
+            ③ NorMuon方差衰减(逐神经元归一化) → ④ 谨慎权重衰减(同号才衰减)
+    参考: Polar Express https://arxiv.org/pdf/2505.16932, NorMuon https://arxiv.org/pdf/2510.05491
     """
 
-    # Nesterov momentum
+    # ① Nesterov momentum: m=μ·m+(1-μ)·∇L → g=∇L+μ·m(外推梯度)
     momentum = momentum_t.to(stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
     g = stacked_grads.lerp_(momentum_buffer, momentum)
@@ -171,22 +177,16 @@ def muon_step_fused(
 class MuonAdamW(torch.optim.Optimizer):
     """
     Combined optimizer: Muon for 2D matrix params, AdamW for others, single GPU version.
+    Muon + AdamW 混合优化器(单GPU版): 2D矩阵→Muon(动量+正交化), 嵌入/标量/1D→AdamW(自适应)
 
-    AdamW - Fused AdamW optimizer step.
-
-    Muon - MomentUm Orthogonalized by Newton-schulz
-    https://kellerjordan.github.io/posts/muon/
-
+    AdamW - Fused AdamW optimizer step. https://arxiv.org/abs/1711.05101
+    Muon - MomentUm Orthogonalized by Newton-schulz. https://kellerjordan.github.io/posts/muon/
     Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
     processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
     matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
     the advantage that it can be stably run in bfloat16 on the GPU.
 
-    Some warnings:
-    - The Muon optimizer should not be used for the embedding layer, the final fully connected layer,
-    or any {0,1}-D parameters; those should all be optimized by a standard method (e.g., AdamW).
-    - To use it with 4D convolutional filters, it works well to just flatten their last 3 dimensions.
-
+    Some warnings: Muon不能用于嵌入/输出层/0-1D参数; 4D卷积核压平后三维即可
     Arguments:
         param_groups: List of dicts, each containing:
             - 'params': List of parameters

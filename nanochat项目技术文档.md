@@ -560,38 +560,124 @@ bash runs/runcpu.sh
 或分步执行：
 
 ```bash
+# ============================================================================
 # 1. 环境配置
+# ============================================================================
 export NANOCHAT_BASE_DIR="$HOME/.cache/nanochat"  # 数据存储目录
 mkdir -p $NANOCHAT_BASE_DIR                        # 确保目录存在
 uv sync --extra cpu                                # 安装CPU版PyTorch
 source .venv/bin/activate                          # 激活虚拟环境
 
+# ============================================================================
 # 2. 分词器训练（约 34 秒，M3 Max）
-python -m nanochat.dataset -n 8                     # 下载8个数据分片（约800MB）
-python -m scripts.tok_train --max-chars=2000000000  # 用2B字符训练分词器
-python -m scripts.tok_eval                           # 评估分词器压缩率
+# ============================================================================
 
+# ↓ dataset.py: 从 HuggingFace(S3) 下载 ClimbMix-400B 数据集的 parquet 分片
+#    内部用 requests + 多进程 Pool 并行下载，带指数退避重试
+#    输出: $NANOCHAT_BASE_DIR/base_data_climbmix/shard_xxxxx.parquet（每个约100MB）
+python -m nanochat.dataset -n 8
+
+# ↓ tok_train.py: 用 rustbpe(Rust实现) 训练 BPE 分词器
+#    内部: parquets_iter_batched() 遍历 parquet 文件 → text_iterator 流式吐文本
+#    → RustBPETokenizer.train_from_iterator() 训练 → 保存 tokenizer.pkl
+#    同时生成 token_bytes.pt：每个 token 对应的 UTF-8 字节数（用于 bpb 计算）
+#    输出: tokenizer.pkl, token_bytes.pt
+python -m scripts.tok_train --max-chars=2000000000
+
+# ↓ tok_eval.py: 对比 nanochat 分词器与 GPT-2/GPT-4 的压缩率
+#    内部: 用7种文本(新闻/韩文/代码/数学/科学/训练集/验证集)计算 bytes/tokens 比率
+#    输出: 终端打印对比表格 + 写入报告 report/tokenizer-evaluation.md
+python -m scripts.tok_eval
+
+# ============================================================================
 # 3. 训练小型模型（约 30 分钟，M3 Max）
-python -m scripts.base_train \
-    --depth=6 \              # 仅 6 层（完整训练用 d24）
-    --head-dim=64 \          # 注意力头维度 64（默认128）
-    --window-pattern=L \     # 全上下文注意力（SDPA不支持滑动窗口）
-    --max-seq-len=512 \      # 短序列（完整训练用2048）
-    --device-batch-size=32 \ # 每步序列数
-    --total-batch-size=16384 \ # 全局批次大小
-    --eval-every=100 \       # 每100步评估验证损失
-    --eval-tokens=524288 \   # 评估用token数
-    --core-metric-every=-1 \ # -1=训练期间跳过CORE评估（省时间）
-    --sample-every=100 \     # 每100步生成文本样本
-    --num-iterations=5000 \  # 训练步数
-    --run=dummy              # 跳过wandb日志
+# ============================================================================
 
-# 4. 基础模型评估：CORE指标 + BPB + 文本样本
+# ↓ base_train.py: 预训练 GPT 模型（最核心的脚本，约631行）
+#    内部流程:
+#      ① build_model_meta() 在 meta device 上构建模型（只定义形状/类型，不分配显存）
+#      ② model.to_empty(device) 分配真实显存 → model.init_weights() 初始化参数
+#      ③ 缩放定律自动计算最优超参数（Token数、Batch Size、学习率、权重衰减）
+#         - 以 d12 为参考基准，通过 Power Lines 论文(η∝D^0.383)向外推
+#         - LR缩放 ∝√(B/B_ref)，权重衰减通过 T_epoch 恒常框架推导
+#      ④ model = torch.compile(model) 编译加速（Windows无MSVC时自动跳过）
+#      ⑤ setup_optimizer() 构建混合优化器: 矩阵参数→Muon, 嵌入/标量→AdamW
+#      ⑥ tokenizing_distributed_data_loader_bos_bestfit() 创建数据加载器
+#         - BOS对齐 + Best-Fit裁剪: 每行以BOS开头，优先选完全放入的最大文档
+#         - 约35% token被裁掉但100%利用率(无padding)
+#      ⑦ 训练循环: 前向→反向→梯度累积→优化器步进→LR/Momentum/WD调度
+#      ⑧ 每 eval_every 步评估 val bpb，每 sample_every 步生成文本样本
+#    输出: $NANOCHAT_BASE_DIR/base_checkpoints/d<N>/model_XXXXX.pt
+#          $NANOCHAT_BASE_DIR/base_checkpoints/d<N>/meta_XXXXX.json
+#          模型由 GPT.__init__() 构建，包含:
+#            - nn.Embedding(wte) 词嵌入
+#            - nn.ModuleList[Block] 共 depth 层Transformer Block
+#            - 每个Block = CausalSelfAttention + MLP(relu²)
+#            - 自定义Linear(无偏置，权重FP32存储/前向转COMPUTE_DTYPE)
+#            - Rotary Embeddings(旋转位置编码，无学习参数)
+#            - RMSNorm(无可学习参数)
+#            - Value Embeddings(ResFormer风格，交替层注入)
+#            - Smear机制(混合前一token嵌入，廉价二元组信息)
+#            - Backout机制(减去中层残差，移除底层特征)
+#            - 滑动窗口注意力(window_pattern)
+python -m scripts.base_train \
+    --depth=6 \
+    --head-dim=64 \
+    --window-pattern=L \
+    --max-seq-len=512 \
+    --device-batch-size=32 \
+    --total-batch-size=16384 \
+    --eval-every=100 \
+    --eval-tokens=524288 \
+    --core-metric-every=-1 \
+    --sample-every=100 \
+    --num-iterations=5000 \
+    --run=dummy
+
+# ============================================================================
+# 4. 基础模型评估
+# ============================================================================
+
+# ↓ base_eval.py: 三步评估（约1-5分钟）
+#    ① 文本样本: Engine.generate_batch() 用温度采样生成7个提示词的补全
+#    ② BPB评估: evaluate_bpb() 计算 train/val 的 bits per byte
+#       - bpb = total_nats / (ln(2) * total_bytes)，消除词表大小影响
+#       - 特殊token贡献0字节，ignore_index=-1的跳过
+#    ③ CORE评估: evaluate_core() 跑DCLM标准的20+个任务
+#       - 先下载 eval_bundle.zip(26MB) → 解压到 eval_bundle/
+#       - 逐个任务: 加载数据→构建prompt→forward_model→计算accuracy
+#       - 最终 CORE = 所有任务 centered accuracy 的均值
+#    输出: 终端打印样本+BPB+CORE + 写入报告 + 保存CSV
 python -m scripts.base_eval --device-batch-size=1 --split-tokens=16384 --max-per-task=16
 
+# ============================================================================
 # 5. SFT 监督微调（约 10 分钟，M3 Max）
+# ============================================================================
+
+# 下载身份数据（S3，不走HF，国内即可下载）
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl \
   https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
+
+# ↓ chat_sft.py: 监督微调让模型学会对话格式+工具调用+多选题（约520行）
+#    内部流程:
+#      ① load_model("base") 加载预训练检查点
+#      ② 从预训练检查点继承优化器状态(momentum缓冲区热启动)
+#      ③ TaskMixture 构建训练数据混合:
+#         - SmolTalk(460K): 通用对话，来自HuggingFace
+#         - CustomJSON(1K×2): 身份个性注入
+#         - MMLU(100K×3): 多选题格式
+#         - GSM8K(8K×4): 数学推理+工具调用(<<计算器>>)
+#         - SimpleSpelling(200K): 拼写单词
+#         - SpellingBee(80K): 数字母个数
+#      ④ render_conversation() 将对话转为 token序列+loss mask
+#         - mask=1 的位置计算损失（只有assistant回复）
+#         - mask=0 的位置忽略（用户消息、特殊token、工具输出）
+#      ⑤ sft_data_generator_bos_bestfit() 数据加载器
+#         - BOS对齐 + Best-Fit打包，padding位置target=-1
+#      ⑥ 训练: model(x,y) → loss → backward → optimizer.step
+#      ⑦ 每 chatcore_every 步评估 ChatCORE(6任务均值)
+#    输出: $NANOCHAT_BASE_DIR/chatsft_checkpoints/d<N>/
+#    注意: 需要HuggingFace下载数据集，无法访问时换用 chat_sft_mini.py
 python -m scripts.chat_sft \
     --max-seq-len=512 \
     --device-batch-size=32 \

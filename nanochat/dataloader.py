@@ -25,10 +25,11 @@ from nanochat.dataset import list_parquet_files
 def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     """
     Infinite iterator over document batches (list of text strings) from parquet files.
+    从parquet文件流式读取文档的无限迭代器(支持DDP分片+断点续训)。
 
-    Handles DDP sharding and approximate resume. Each yield is (text_batch, (pq_idx, rg_idx, epoch))
-    where text_batch is a list of document strings, indices track position for resumption,
-    and epoch counts how many times we've cycled through the dataset (starts at 1).
+    Handles DDP sharding: 每个rank处理不同的row_group(rank0→rg0,8,16... rank1→rg1,9,17...)
+    Approximate resume: resume_state_dict={pq_idx, rg_idx, epoch} 恢复时跳过已处理数据
+    Each yield: (text_batch, (pq_idx, rg_idx, epoch))
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 

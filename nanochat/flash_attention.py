@@ -1,17 +1,16 @@
 """
 Unified Flash Attention interface with automatic FA3/SDPA switching.
+统一Flash Attention接口: Hopper(H100 SM90)+bf16 → FA3 kernel，否则 → PyTorch SDPA回退
 
 Exports `flash_attn` module that matches the FA3 API exactly, but falls back
 to PyTorch SDPA on non-Hopper GPUs (including Blackwell), MPS, and CPU.
 
+GTX1630(SM75) → SDPA回退(无FA3)，功能相同但无滑动窗口加速
+
 Usage (drop-in replacement for FA3):
     from nanochat.flash_attention import flash_attn
-
-    # Training (no KV cache)
-    y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-
-    # Inference (with KV cache)
-    y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
+    y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)  # Training
+    y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)    # Inference
 """
 import torch
 import torch.nn.functional as F

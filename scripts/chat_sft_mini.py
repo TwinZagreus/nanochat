@@ -1,7 +1,12 @@
 """
 Minimal SFT that only uses local identity_conversations.jsonl.
 No HuggingFace dependency. Use this when HF is unreachable.
+极简SFT: 仅用本地 identity_conversations.jsonl (1000条身份对话)，不依赖HuggingFace。
+适用于: 国内网络无法访问HF、快速验证SFT流程、小规模实验。
+完整SFT请用 chat_sft.py (需要SmolTalk/MMLU/GSM8K等HF数据集)
+
 Run as: python -m scripts.chat_sft_mini
+流程: 加载预训练模型 → 用identity数据做SFT → 保存到 chatsft_checkpoints/
 """
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
@@ -32,7 +37,8 @@ from tasks.customjson import CustomJSON
 model, tokenizer, meta = load_model("base", device, phase="train")
 print0(f"Loaded base model d{model.config.n_layer}, step {meta['step']}")
 
-# Identity data (already downloaded via curl from S3)
+# 身份数据路径: 需先通过 curl 从 S3 下载 (不用翻墙)
+# curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 base_dir = get_base_dir()
 identity_path = os.path.join(base_dir, "identity_conversations.jsonl")
 assert os.path.exists(identity_path), f"Not found: {identity_path}. Download with: curl -L -o {identity_path} https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
