@@ -169,29 +169,38 @@ if val_text:
 tokenizer_results = {}
 vocab_sizes = {}
 
+# 用三种分词器分别编码同一批文本，对比压缩效率
+# Encode the same texts with 3 tokenizers to compare compression efficiency
 for tokenizer_name in ["gpt2", "gpt4", "ours"]:
 
+    # ① 加载对应分词器
     if tokenizer_name == "gpt2":
-        tokenizer = RustBPETokenizer.from_pretrained("gpt2") # GPT-2 基础模型分词器 / gpt-2 base model tokenizer
+        tokenizer = RustBPETokenizer.from_pretrained("gpt2") # GPT-2 词表 50257 / GPT-2 tokenizer (vocab=50257)
     elif tokenizer_name == "gpt4":
-        tokenizer = RustBPETokenizer.from_pretrained("cl100k_base") # GPT-4 基础模型分词器 / gpt-4 base model tokenizer
+        tokenizer = RustBPETokenizer.from_pretrained("cl100k_base") # GPT-4 词表 ~100K / GPT-4 tokenizer (vocab≈100K)
     else:
-        tokenizer = get_tokenizer()
+        tokenizer = get_tokenizer()  # 我们刚训练的，词表默认 32768 / our freshly trained tokenizer
 
+    # 记录词表大小
     vocab_sizes[tokenizer_name] = tokenizer.get_vocab_size()
     tokenizer_results[tokenizer_name] = {}
 
+    # ② 对每种文本类型（新闻/韩文/代码/数学/科学/训练集/验证集）分别测试
     for name, text in all_text:
+        # ③ 编码 → 解码，确认无损往返
         encoded = tokenizer.encode(text)
         decoded = tokenizer.decode(encoded)
-        assert decoded == text
+        assert decoded == text  # 必须一字不差 / lossless round-trip check
 
+        # ④ 计算压缩率：原始 UTF-8 字节数 / token 数
+        # ratio = bytes / tokens，比值越小说明分词越细
+        # 理想情况一个常见词对应一个 token，压缩率约 3~5
         encoded_bytes = text.encode('utf-8')
         ratio = len(encoded_bytes) / len(encoded)
         tokenizer_results[tokenizer_name][name] = {
-            'bytes': len(encoded_bytes),
-            'tokens': len(encoded),
-            'ratio': ratio
+            'bytes': len(encoded_bytes),   # 原始文本的 UTF-8 字节数
+            'tokens': len(encoded),        # 编码后的 token 数量
+            'ratio': ratio                 # 压缩率 (bytes/token)
         }
 
 # ANSI 颜色代码，用于终端输出着色 / ANSI color codes
