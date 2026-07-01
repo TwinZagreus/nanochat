@@ -192,6 +192,56 @@
             ]
         },
 
+        {
+            "name": "2f. Base Train - d6 中等规模 (depth=6, head_dim=64, GPU)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data"
+            },
+            "args": [
+                "--depth", "6",
+                "--head-dim", "64",
+                "--window-pattern", "L",
+                "--max-seq-len", "512",
+                "--device-batch-size", "32",
+                "--total-batch-size", "16384",
+                "--eval-every", "100",
+                "--eval-tokens", "524288",
+                "--core-metric-every", "-1",
+                "--sample-every", "100",
+                "--num-iterations", "5000",
+                "--run", "dummy"
+            ]
+        },
+        {
+            "name": "2g. Base Train - d4 快速冒烟测试 (CPU, 20步验证流程)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/base_train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "NANOCHAT_BASE_DIR": "${workspaceFolder}/data",
+                "TORCH_COMPILE_DISABLE": "1"
+            },
+            "args": [
+                "--depth", "4",
+                "--max-seq-len", "512",
+                "--device-batch-size", "1",
+                "--eval-tokens", "512",
+                "--core-metric-every", "-1",
+                "--total-batch-size", "512",
+                "--num-iterations", "20",
+                "--run", "dummy"
+            ]
+        },
+
         // =========================================================================
         // 3. 基础模型评估 (Base Model Evaluation)
         //    评估预训练模型的 loss/bpb/CORE 指标
