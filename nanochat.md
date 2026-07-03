@@ -432,6 +432,106 @@ q = q.view(2, 128)        # 前 128 个给头 0，后 128 个给头 1
 
 `view` 是纯机械切段，不改变数据顺序。`256 = n_head × head_dim = 2×128`。
 
+**主流模型都用硬切**（GPT-2/3/4、Gemini、DeepSeek 都一样），单个大 W 投影 + reshape 拆头。不同在头结构：ChatGPT 用标准 MHA，Gemini 用 GQA（KV 头更少），DeepSeek 用 MLA（KV 先压缩到潜空间）。但投影层永远是一个大 W，GPU 偏好大矩阵乘。
+
+---
+
+## 10. GPTConfig → GPT 模型构建（以冒烟测试 2g 为例）
+
+### 参数推导
+
+```python
+# 冒烟测试输入:
+depth=4, head_dim=128, aspect_ratio=64, max_seq_len=512
+vocab_size=32768, window_pattern="SSSL"
+
+# 推导:
+base_dim  = 4 × 64 = 256
+model_dim = 256 (向上取整到 128 倍数)
+num_heads = 256 // 128 = 2
+n_kv_head = 2  (等于 n_head，标准 MHA，不启用 GQA)
+
+# GPTConfig:
+config = GPTConfig(
+    sequence_len=512,    # 最大上下文
+    vocab_size=32768,    # 词表大小
+    n_layer=4,           # 4 层 Transformer
+    n_head=2,            # 2 个注意力头
+    n_kv_head=2,         # KV 头=Q 头 (标准 MHA)
+    n_embd=256,          # 嵌入维度
+    window_pattern="SSSL" # 滑动窗口模式
+)
+```
+
+### GPT(config) 内部创建了什么
+
+执行 `GPT(config)` 时，`__init__` 在 meta 设备上运行（只有形状，不占内存）：
+
+**① 滑动窗口：** `window_pattern="SSSL"` 按 4 层平铺，最后一层强制 L
+```python
+Layer 0: S (窗口=512//4=128)
+Layer 1: S
+Layer 2: S
+Layer 3: L (512, 最后一层强制全上下文)
+```
+
+**② 词表填充：** 32768 对齐到 64 倍数 → 仍是 32768（刚好整除）
+
+**③ 核心模块：**
+
+| 模块 | 创建内容 | 形状 (d4) |
+|---|---|---|
+| `wte` | 词嵌入 | `Embedding(32768, 256)` |
+| `h[0]~h[3]` | 4 个 Transformer Block | 每个 = Attention + MLP |
+| `lm_head` | 输出投影 | `Linear(256, 32768)` |
+
+**④ 每个 Block 内部：**
+
+| 子模块 | 代码 | 形状 (d4) |
+|---|---|---|
+| `c_q` | Q 查询投影 | `Linear(256, 2×128) = Linear(256, 256)` |
+| `c_k` | K 键投影 | `Linear(256, 2×128) = Linear(256, 256)` |
+| `c_v` | V 值投影 | `Linear(256, 2×128) = Linear(256, 256)` |
+| `c_proj` (attn) | 注意力输出投影 | `Linear(256, 256)` |
+| `c_fc` (MLP) | MLP 升维 | `Linear(256, 1024)` (4×扩展) |
+| `c_proj` (MLP) | MLP 降维 | `Linear(1024, 256)` |
+
+**⑤ 额外结构：**
+
+| 组件 | 说明 | 形状 |
+|---|---|---|
+| `resid_lambdas` | 每层残差缩放，init 1.15→1.05 线性衰减 | `[4]` |
+| `x0_lambdas` | 每层混入初始嵌入权重，init 0.20→0.05 衰减 | `[4]` |
+| `smear_gate` + `smear_lambda` | 前 token 嵌入泄漏（廉价 bigram） | `Linear(24,1)` + `[1]` |
+| `backout_lambda` | 中层残差减去系数 | `[1]` |
+| `value_embeds` | ResFormer VE，交替层启用（层 0,2 + 最后一层=层 3） | 3 个 `Embedding(32768, 256)` |
+| `cos` / `sin` | 预计算 RoPE 频率 (10×seq_len=5120) | `[5120, 64]` 各一个 |
+
+### 参数量估算
+
+```
+wte:              32768 × 256 =  8,388,608
+lm_head:          32768 × 256 =  8,388,608
+每层 Attention:
+  c_q + c_k + c_v: 3 × 256×256 = 196,608
+  c_proj:          256×256    =  65,536
+  ─────────────────────────────────────
+  每层 Attention 小计:          262,144
+每层 MLP:
+  c_fc:            256×1024   = 262,144
+  c_proj:          1024×256   = 262,144
+  ─────────────────────────────────────
+  每层 MLP 小计:                524,288
+每层 Block 小计: 262,144 + 524,288 = 786,432
+4 层 Block:       4 × 786,432 = 3,145,728
+value_embeds:     3 × 32768×256 = 25,165,824 (3 个 VE)
+标量参数:          resid(4)+x0(4)+smear(1)+backout(1) ≈ 10
+──────────────────────────────────────────
+总计 ≈ 8.4M + 8.4M + 3.1M + 25.2M ≈ 45M 参数
+```
+
+> 注意：d4 模型虽小，但 VE（value embeddings）是大头——3 个 `[32768,256]` 占了 25M 参数，远远超过 4 层 Transformer 的 3.1M 矩阵参数。这是 nanochat 特有的"参数膨胀"设计。
+
 ---
 
 ## 8. 滑动窗口注意力
@@ -479,3 +579,93 @@ d4 模型 ~3.4M 参数，全是随机初始化 → 几万步梯度下降训练�
 | 标量参数 | ~10 个 | 忽略不计 |
 
 Q 负责"提问"、K 负责"匹配"、V 负责"输出内容"——这不是人为规定，是数学结构（Q 和 K 通过点积耦合，V 通过加权耦合）加上梯度反向传播自然形成的分工。
+
+---
+
+## 11. CausalSelfAttention 详解
+
+以 d4 (n_head=2, head_dim=128, n_embd=256) 为例。
+
+### __init__ 初始化
+
+```python
+self.n_head   = 2     # Q 头数
+self.n_kv_head = 2    # KV 头数 (标准 MHA)
+self.head_dim = 128   # 每头 128 维 (256/2)
+self.n_embd   = 256
+
+# 四个 Linear 层（无 bias）
+self.c_q    = Linear(256, 2×128) = Linear(256, 256)  # Q 投影
+self.c_k    = Linear(256, 2×128) = Linear(256, 256)  # K 投影
+self.c_v    = Linear(256, 2×128) = Linear(256, 256)  # V 投影
+self.c_proj = Linear(256, 256)                        # 输出投影
+
+# VE 门控 (仅 VE 层启用, d4 模型的层 0, 2, 3)
+self.ve_gate = Linear(12, 2)  # 前 12 维 → 每头一个门控值
+```
+
+### forward 六步流程
+
+**输入：** `x [B, T, 256]`, ve (可选), cos_sin, window_size, kv_cache
+
+```python
+B, T, C = x.size()  # 训练: B=1, T=512, C=256
+
+# === 第 1 步：QKV 投影 ===
+q = self.c_q(x).view(B, T, 2, 128)   # [1, 512, 2, 128]
+k = self.c_k(x).view(B, T, 2, 128)   # [1, 512, 2, 128]
+v = self.c_v(x).view(B, T, 2, 128)   # [1, 512, 2, 128]
+
+# === 第 2 步：Value Embedding 注入（仅 VE 层）===
+# ResFormer 风格：可学习的 value embedding 直接加到 V 上
+if ve is not None:
+    ve = ve.view(B, T, 2, 128)       # [1, 512, 2, 128]
+    gate = 3 * sigmoid(ve_gate(x[前12维]))  # [1, 512, 2], 范围 (0, 3)
+    v = v + gate * ve                # 门控加权混入
+
+# === 第 3 步：RoPE 旋转位置编码 ===
+# 对 Q 和 K 的最后 128 维 → 拆成 64 对 → 每对做 2D 旋转
+# 效果：Q·K 内积自动包含相对位置信息，无需学习参数
+q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+
+# === 第 4 步：QK 归一化 ===
+q, k = norm(q), norm(k)   # RMS 归一化（无学习参数）
+q = q * 1.2               # 微小缩放增强注意力锐度
+k = k * 1.2
+
+# === 第 5 步：Flash Attention ===
+# 训练路径（kv_cache=None）：
+y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+# 内部：Q@K^T → softmax → @V，自动处理因果 mask + 滑动窗口
+#   头 0: [512,128]@[128,512]→[512,512] → softmax → @V[512,128] → [512,128]
+#   头 1: 同上
+#   结果: [1, 512, 2, 128]
+
+# 推理路径（kv_cache 不为 None）：
+# 增量追加 K/V 到缓存，只算新 token 的注意力
+
+# === 第 6 步：拼回头 + 输出投影 ===
+y = y.contiguous().view(B, T, 256)   # [1, 512, 2, 128] → [1, 512, 256]
+y = self.c_proj(y)                    # [1, 512, 256] (零初始化，训练初期≈直通)
+return y
+```
+
+### 归一化规则（该用哪些、不用哪些）
+
+| Op | 归一化 | 原因 |
+|---|---|---|
+| 输入 `x` (Block 前) | RMSNorm ✓ | Pre-LN：先 norm 再进注意力 |
+| Q / K | QK RMSNorm ✓ | 防止注意力 logit 爆炸，训练更稳定 |
+| V | 不 norm | V 的尺度由权重自然控制 |
+| 注意力输出 | 不 norm | 通过 `c_proj`（零初始化）后与残差加回 |
+| MLP 输入 | RMSNorm ✓ | Block 内第二个 Pre-LN |
+
+### 训练 vs 推理的关键区别
+
+| | 训练 | 推理 |
+|---|---|---|
+| `kv_cache` | `None` | `KVCache` 对象 |
+| K/V 来源 | 从 x 投影（完整 T） | 新 token 的 k/v 追加到缓存 |
+| 注意力模式 | 一次性算 T×T | 增量：只算新 token 对历史的注意力 |
+| 实现 | `flash_attn_func` | `flash_attn_with_kvcache` |
+| 滑动窗口 | 通过 `window_size` 参数 | 同左 |
