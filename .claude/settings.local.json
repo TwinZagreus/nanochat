@@ -24,7 +24,11 @@
       "Bash(uv cache *)"
     ],
     "additionalDirectories": [
-      "D:\\devTools"
+      "D:\\devTools",
+      "Bash(git commit -m ':*)",
+      "Bash(git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push)",
+      "Bash(git -c http.proxy=\"\" -c https.proxy=\"\" push --dry-run)",
+      "Bash(ping -n 1 github.com)"
     ]
   }
 }

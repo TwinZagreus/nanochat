@@ -51,72 +51,183 @@ print_banner()
 # CLI 命令行参数
 # CLI arguments
 parser = argparse.ArgumentParser(description="Pretrain base model / 预训练基座模型")
-# 日志记录
-# Logging
-parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging) / wandb 运行名称（'dummy' 禁用 wandb 日志）")
-# 运行时
-# Runtime
-parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect) / 设备类型（空=自动检测）")
-# FP8 训练
-# FP8 training
-parser.add_argument("--fp8", action="store_true", help="enable FP8 training (requires H100+ GPU and torchao) / 启用 FP8 训练（需要 H100+ GPU 和 torchao）")
-parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"], help="FP8 scaling recipe: tensorwise (faster, recommended) or rowwise (more accurate but slower) / FP8 缩放方案：tensorwise（更快，推荐）或 rowwise（更精确但较慢）")
-# 编译
-# Compilation
-parser.add_argument("--no-compile", action="store_true", help="disable torch.compile (useful for Windows without MSVC compiler) / 禁用 torch.compile（适用于没有 MSVC 编译器的 Windows）")
-# 模型架构
-# Model architecture
-parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model / Transformer 模型的深度（层数）")
-parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio / 模型维度 = 深度 * 宽高比")
-parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention / 注意力头的目标维度")
-parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length / 最大上下文长度")
-parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL') / 跨层平铺的滑动窗口模式：L=全上下文, S=半上下文（如 'SSL'）")
-# 训练范围（按优先级只使用一个）
-# Training horizon (only one used, in order of precedence)
-parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable) / 显式指定优化步数（-1 = 禁用）")
-parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable) / 根据目标 FLOPs 计算迭代次数（-1 = 禁用）")
-parser.add_argument("--target-param-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable) / 根据数据：参数比计算迭代次数（Chinchilla=20, -1 = 禁用）")
-# 优化
-# Optimization
-parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM. / 每个设备的批次大小。如果显存不足，可以减少到 16,8,4...")
-parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal) / 总批次大小（以 token 计），如 524288。（-1 = 自动计算最优值）")
-parser.add_argument("--embedding-lr", type=float, default=0.3, help="learning rate for embedding parameters (Adam) / 嵌入参数的学习率（Adam）")
-parser.add_argument("--unembedding-lr", type=float, default=0.008, help="learning rate for unembedding parameters (Adam) / 反嵌入参数的学习率（Adam）")
-parser.add_argument("--weight-decay", type=float, default=0.28, help="cautious weight decay for the Muon optimizer (for weights) / Muon 优化器的权重衰减（用于权重矩阵）")
-parser.add_argument("--matrix-lr", type=float, default=0.02, help="learning rate for matrix parameters (Muon) / 矩阵参数的学习率（Muon）")
-parser.add_argument("--scalar-lr", type=float, default=0.5, help="learning rate for scalars (resid_lambdas, x0_lambdas) / 标量参数的学习率（resid_lambdas, x0_lambdas）")
-parser.add_argument("--warmup-steps", type=int, default=40, help="number of steps for LR warmup / 学习率预热步数")
-parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown / 学习率衰减占总迭代的比例")
-parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR / 最终学习率占初始学习率的比例")
-parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable) / 从该步恢复训练（-1 = 禁用）")
-# 评估
-# Evaluation
-parser.add_argument("--eval-every", type=int, default=250, help="evaluate val bpb every N steps (-1 = disable) / 每 N 步评估验证集 bpb（-1 = 禁用）")
-parser.add_argument("--eval-tokens", type=int, default=80*524288, help="number of tokens to evaluate val loss on / 用于评估验证损失的 token 数量")
-parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluate CORE metric every N steps (-1 = disable) / 每 N 步评估 CORE 指标（-1 = 禁用）")
-parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric / CORE 指标每个任务使用的样本数")
-parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable) / 每 N 步从模型采样（-1 = 禁用）")
-parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end) / 每 N 步保存检查点（-1 = 仅在结束时保存）")
-# 输出
-# Output
-parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name / 覆盖检查点目录名称的模型标签")
+
+# =============================================================================
+# 日志记录（Logging）
+# =============================================================================
+parser.add_argument("--run", type=str, default="dummy",
+    help="wandb 运行名称，'dummy' 跳过 wandb 日志（离线实验用），正式训练建议取有意义的名字如 'speedrun' / "
+         "wandb run name; 'dummy' disables wandb logging (for offline experiments)")
+
+# =============================================================================
+# 运行时（Runtime）
+# =============================================================================
+parser.add_argument("--device-type", type=str, default="",
+    help="设备类型：cuda|cpu|mps。空字符串=自动检测（CUDA>MPS>CPU 优先级） / "
+         "Device type: cuda|cpu|mps. Empty = autodetect (CUDA > MPS > CPU)")
+
+# =============================================================================
+# FP8 训练（FP8 training）—— 仅 H100 (SM90+) 有效，可提速 ~1.5x，节省 ~30% 显存
+# =============================================================================
+parser.add_argument("--fp8", action="store_true",
+    help="启用 FP8 混合精度训练，前向+反向的矩阵乘法用 FP8，其余保持 BF16。仅 H100+ 支持 / "
+         "Enable FP8 mixed-precision training (matrix multiplies in FP8, rest in BF16). H100+ only")
+parser.add_argument("--fp8-recipe", type=str, default="tensorwise", choices=["rowwise", "tensorwise"],
+    help="FP8 缩放粒度：tensorwise=整个张量共享一个 scale（快，推荐）；rowwise=每行一个 scale（更精确但慢） / "
+         "FP8 scaling granularity: tensorwise=one scale per tensor (fast, recommended); rowwise=one scale per row (more accurate, slower)")
+
+# =============================================================================
+# 编译（Compilation）
+# =============================================================================
+parser.add_argument("--no-compile", action="store_true",
+    help="禁用 torch.compile。Windows 无 MSVC 编译器时必须加此参数，否则会报错 / "
+         "Disable torch.compile. Required on Windows without MSVC compiler")
+
+# =============================================================================
+# 模型架构（Model architecture）—— depth 是唯一核心旋钮，其余自动推导
+# =============================================================================
+parser.add_argument("--depth", type=int, default=20,
+    help="【核心参数】Transformer 层数。d4≈37M, d12≈354M, d20≈952M, d24≈1.6B (GPT-2级别)。"
+         "宽度/注意力头数/学习率/训练步数等均由此自动推导 / "
+         "【Core knob】Number of Transformer layers. d4≈37M, d12≈354M, d20≈952M, d24≈1.6B (GPT-2 scale). "
+         "All other hyperparams are auto-derived from this")
+parser.add_argument("--aspect-ratio", type=int, default=64,
+    help="模型宽度比例：model_dim = depth × aspect_ratio（向上取整到 head_dim 倍数）。d20×64=1280 维 / "
+         "Model width ratio: model_dim = depth × aspect_ratio (rounded up to head_dim multiple). d20×64=1280 dims")
+parser.add_argument("--head-dim", type=int, default=128,
+    help="每个注意力头的维度。注意力头数 = model_dim / head_dim。必须被 8 整除（FA3 要求） / "
+         "Dimension per attention head. num_heads = model_dim / head_dim. Must be divisible by 8 (FA3 requirement)")
+parser.add_argument("--max-seq-len", type=int, default=2048,
+    help="最大上下文长度（token 数）。越长约消耗显存（Attention 是 O(n²)），VRAM 不足时可降至 1024 或 512 / "
+         "Max context length in tokens. Longer = more VRAM (attention is O(n²)). Reduce to 1024/512 if OOM")
+parser.add_argument("--window-pattern", type=str, default="SSSL",
+    help="滑动窗口注意力模式，按层重复平铺。L=全上下文(完整 attention)，S=1/4 上下文(局部 attention)。"
+         "最后一层始终为 L。例如 'SSSL' 表示每 4 层中有 1 层用全上下文。非 H100 GPU 建议用 'L'（SDPA 不支持窗口注意力） / "
+         "Sliding window pattern tiled across layers. L=full context, S=1/4 context. "
+         "Last layer always L. Non-H100 GPU: use 'L' (SDPA doesn't support sliding window)")
+
+# =============================================================================
+# 训练范围（Training horizon）—— 三个参数按优先级互斥：num_iterations > target_flops > target_param_data_ratio
+# =============================================================================
+parser.add_argument("--num-iterations", type=int, default=-1,
+    help="显式指定训练步数，-1=不使用此参数。例如 --num-iterations=100 只跑 100 步（快速验证用） / "
+         "Explicit number of training steps. -1 = disabled. E.g. --num-iterations=100 for quick smoke test")
+parser.add_argument("--target-flops", type=float, default=-1.0,
+    help="根据目标总算力（FLOPs）自动计算训练步数，-1=不使用。少用，通常用 token/params 比更方便 / "
+         "Auto-compute steps to reach target total FLOPs. -1 = disabled. Rarely used")
+parser.add_argument("--target-param-data-ratio", type=float, default=12,
+    help="【默认】Token/参数比，自动计算训练步数。12=计算最优(Chinchilla≈20), 8=略欠训练(更快,GPT-2速通用)。-1=禁用 / "
+         "【Default】Target token-to-param ratio. 12=compute-optimal (Chinchilla≈20), "
+         "8=slightly undertrained (faster, used in speedrun). -1=disabled")
+
+# =============================================================================
+# 优化（Optimization）
+# =============================================================================
+parser.add_argument("--device-batch-size", type=int, default=32,
+    help="每 GPU 每步处理的序列数。OOM 时优先降低此值：32→16→8→4→2→1。降低不会影响训练效果（梯度累积自动补偿） / "
+         "Sequences per GPU per step. Reduce first if OOM: 32→16→8→4→2→1. "
+         "Lower values don't hurt training (gradient accumulation compensates)")
+parser.add_argument("--total-batch-size", type=int, default=-1,
+    help="全局批次大小（以 token 计），-1=根据缩放定律自动计算最优值。手动设置如 524288。"
+         "全局批次大小 ÷ (device_batch_size × max_seq_len × world_size) = 梯度累积步数 / "
+         "Total batch size in tokens. -1 = auto-compute optimal via scaling laws. "
+         "E.g. 524288. Accumulation steps = total / (device × seq_len × world_size)")
+parser.add_argument("--embedding-lr", type=float, default=0.3,
+    help="词嵌入层 (nn.Embedding) 的学习率（用 AdamW 优化）。嵌入层对 LR 较敏感，需要较大值 / "
+         "Learning rate for word embedding layer (AdamW). Embeddings need relatively high LR")
+parser.add_argument("--unembedding-lr", type=float, default=0.008,
+    help="LM Head（输出投影层）的学习率（用 AdamW 优化）。与 embedding 不共享权重 (untied) / "
+         "Learning rate for LM head / unembedding layer (AdamW). Not tied with embedding weights")
+parser.add_argument("--weight-decay", type=float, default=0.28,
+    help="Muon 优化器的权重衰减系数。仅在梯度方向与参数方向一致时才施加（cautious weight decay） / "
+         "Weight decay coefficient for Muon optimizer. Applied cautiously: only when gradient aligns with parameter direction")
+parser.add_argument("--matrix-lr", type=float, default=0.02,
+    help="矩阵参数（所有 Linear 层权重）的基准学习率（用 Muon 优化）。实际 lr 会按缩放定律调整 / "
+         "Base learning rate for matrix parameters (Muon optimizer). Actual LR is scaled by model size")
+parser.add_argument("--scalar-lr", type=float, default=0.5,
+    help="标量参数的学习率，如 resid_lambdas（残差缩放系数）、x0_lambdas（初始嵌入混合系数）等 / "
+         "Learning rate for scalar parameters: resid_lambdas, x0_lambdas, etc.")
+parser.add_argument("--warmup-steps", type=int, default=40,
+    help="学习率线性预热步数。从 0 线性升至目标 LR，避免训练初期梯度不稳定 / "
+         "Number of linear LR warmup steps. LR ramps from 0 to target, stabilizes early training")
+parser.add_argument("--warmdown-ratio", type=float, default=0.65,
+    help="学习率衰减开始的位置（占总步数的比例）。0.65 表示前 65% 常数 LR，后 35% 线性衰减 / "
+         "Fraction of total steps where LR decay begins. 0.65 = 65% constant LR, then linear decay over last 35%")
+parser.add_argument("--final-lr-frac", type=float, default=0.05,
+    help="最终学习率 = 初始 LR × 此值。0.05 表示衰减到初始 LR 的 5%，实现充分收敛 / "
+         "Final LR = initial LR × this fraction. 0.05 means decay to 5% of initial LR for good convergence")
+parser.add_argument("--resume-from-step", type=int, default=-1,
+    help="从指定步数恢复训练，-1=从头训练。会加载模型参数+优化器状态+数据加载器位置，无缝接续 / "
+         "Resume training from this step. -1 = train from scratch. "
+         "Loads model+optimizer+dataloader state for seamless continuation")
+
+# =============================================================================
+# 评估（Evaluation）—— 训练期间定期执行，不影响训练本身
+# =============================================================================
+parser.add_argument("--eval-every", type=int, default=250,
+    help="每 N 步在验证集上评估一次 BPB（bits per byte）。-1=跳过。频繁评估花时间，250 是合理平衡 / "
+         "Evaluate validation BPB every N steps. -1 = skip. 250 is a reasonable balance")
+parser.add_argument("--eval-tokens", type=int, default=80*524288,
+    help="验证集评估时使用的 token 总数（默认约 42M）。越多越精确但越慢 / "
+         "Total tokens for validation BPB evaluation. More = more accurate but slower")
+parser.add_argument("--core-metric-every", type=int, default=2000,
+    help="每 N 步评估 CORE 指标（20+ 下游任务的综合得分）。很耗时，间隔设大一些。2000 是合理默认。-1=跳过 / "
+         "Evaluate CORE metric every N steps (20+ downstream tasks). Expensive, so use larger intervals. -1 = skip")
+parser.add_argument("--core-metric-max-per-task", type=int, default=500,
+    help="CORE 评估时每个任务最多使用的样本数。减少可加速评估，500 是高效默认 / "
+         "Max examples per task for CORE evaluation. Reduce to speed up. 500 is efficient default")
+parser.add_argument("--sample-every", type=int, default=2000,
+    help="每 N 步用当前模型生成文本样本（看训练进度）。-1=跳过 / "
+         "Generate text samples every N steps to inspect training progress. -1 = skip")
+parser.add_argument("--save-every", type=int, default=-1,
+    help="每 N 步保存一次检查点（模型+优化器+元数据），-1=仅在训练结束时保存。检查点文件较大(数GB) / "
+         "Save checkpoint every N steps. -1 = only save at end. Checkpoint files are large (several GB)")
+
+# =============================================================================
+# 输出（Output）
+# =============================================================================
+parser.add_argument("--model-tag", type=str, default=None,
+    help="自定义模型标签，用于检查点目录名。默认 None → 自动取 'd{depth}'，如 d20 → base_checkpoints/d20/ / "
+         "Custom model tag for checkpoint dir. Default None → auto 'd{depth}', e.g. d20 → base_checkpoints/d20/")
+
 args = parser.parse_args()
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # 计算初始化与 wandb 日志
 # Compute init and wandb logging
 
+# ① 设备检测：命令行指定优先，否则自动检测（CUDA > MPS > CPU）
+# Device detection: CLI arg takes priority, otherwise autodetect (CUDA > MPS > CPU)
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
+
+# ② 初始化分布式环境，返回：
+#    ddp           - bool, 是否多卡分布式（world_size > 1）
+#    ddp_rank      - int, 当前进程编号，0=主进程（负责日志/检查点/wandb），其他=worker
+#    ddp_local_rank - int, 当前节点上的本地 GPU 编号
+#    ddp_world_size - int, 总 GPU 数量
+#    device         - torch.device, 当前进程绑定的计算设备，如 cuda:0 / cpu
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
-master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+
+# ③ 只有 rank=0 的进程负责日志、保存检查点、wandb 上报，避免多卡重复操作
+master_process = ddp_rank == 0
+
+# ④ CUDA 同步函数：用于精确计时（确保 GPU 操作完成后再计时）。CPU/MPS 不需要同步，用空函数代替
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
+
+# ⑤ 查询 GPU 显存峰值（字节数），用于日志记录。CPU/MPS 始终返回 0
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
+
+# ⑥ 获取 GPU 峰值算力（TFLOPS），用于计算 MFU（Model FLOPs Utilization，模型算力利用率）
+# MFU = 实际 FLOPs / 峰值 FLOPs，衡量 GPU 利用效率。如 H100 BF16 ≈ 989 TFLOPS
 if device_type == "cuda":
-    gpu_device_name = torch.cuda.get_device_name(0)
-    gpu_peak_flops = get_peak_flops(gpu_device_name)
+    gpu_device_name = torch.cuda.get_device_name(0)          # 如 "NVIDIA H100 80GB HBM3"
+    gpu_peak_flops = get_peak_flops(gpu_device_name)         # 如 9.89e14 (989 TFLOPS)
     print0(f"GPU: {gpu_device_name} | Peak FLOPS (BF16): {gpu_peak_flops:.2e}")
 else:
-    gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
+    gpu_peak_flops = float('inf')  # CPU/MPS 上 MFU 无意义，设为无穷大跳过计算
+
+# ⑦ 打印当前计算精度及选择原因
+# 如: "COMPUTE_DTYPE: torch.bfloat16 (CUDA SM90+ GPU detected)"
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
@@ -150,21 +261,51 @@ vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
 
 # -----------------------------------------------------------------------------
-# 初始化模型
-# Initialize the Model
+# 初始化模型 — 三步：meta 构建 → 分配内存 → 初始化权重
+# Initialize the Model — three steps: meta build → allocate memory → init weights
+#
+# 以冒烟测试 2g (d4, head_dim=128 默认, aspect_ratio=64) 为例走一遍数据流：
+#   depth=4, base_dim=4×64=256, 向上取整到128倍数→ model_dim=256
+#   num_heads = 256/128 = 2
+#   GPTConfig: n_layer=4, n_embd=256, n_head=2, vocab=32768, seq_len=512
+#
+# 模型结构（每一层）：
+#   Input token ids [B, T] → Embedding [B, T, 256]
+#   → 4× Block（每个 Block = CausalSelfAttention + MLP）
+#       Attention: Q: [256→256], K: [256→256], V: [256→256], 输出投影 [256→256]
+#       MLP:       两层 Linear，中间维度 256×4=1024，激活 ReLU²
+#   → RMSNorm → Linear(256→32768) LM Head → softcap tanh → loss
+#
+# 每层矩阵参数形状（d4, model_dim=256, head_dim=128）：
+#   Attention:
+#     c_attn   [256, 768]    QKV 三合一投影 (256×3=768)
+#     c_proj   [256, 256]    注意力输出投影
+#   MLP:
+#     c_fc     [1024, 256]   升维 (256→1024)
+#     c_proj   [256, 1024]   降维 (1024→256)
+#   共 4 个矩阵 × 4 层 = 16 个 Linear 层
+#   额外: Embedding [32768, 256], LM Head [32768, 256] (untied, 不共享)
+#   总参数量 ≈ 3.4M（不含标量参数如 resid_lambdas 等）
 
 def build_model_meta(depth):
     """在 meta 设备上为给定深度构建模型（仅形状/数据类型，无实际数据）。
 
     Build a model on meta device for a given depth (shapes/dtypes only, no data).
+
+    meta 设备是 PyTorch 的"幽灵设备"——tensor 只有 shape/dtype，不消耗任何内存。
+    作用：提前知道模型结构（参数量、每层 shape），用于计算训练步数和优化器配置。
     """
-    # 将模型维度向上调整到 head_dim 的最近整数倍，以保证整除
-    # （FA3 要求 head_dim 能被 8 整除，这里保证 head_dim == args.head_dim 精确成立）
-    # Model dim is nudged up to nearest multiple of head_dim for clean division
-    # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
+    # ① 计算模型维度：base_dim = depth × aspect_ratio (默认 4×64=256)
+    #    向上取整到 head_dim (默认 128) 的最近整数倍，保证整除
+    #    d4, head_dim=128: 256 已是 128 的倍数 → model_dim=256, num_heads=256/128=2
+    #    d6, head_dim=128: 6×64=384 → 向上取整 → 384, num_heads=384/128=3
+    #    d4, head_dim=64:  256 已是 64 的倍数  → model_dim=256, num_heads=256/64=4
     base_dim = depth * args.aspect_ratio
     model_dim = ((base_dim + args.head_dim - 1) // args.head_dim) * args.head_dim
     num_heads = model_dim // args.head_dim
+
+    # ② 组装 GPTConfig → 在 meta 设备上创建 GPT 对象
+    #    此时所有 Linear/Embedding 层内部 tensor 都指向 meta 设备，不占显存
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
@@ -174,14 +315,25 @@ def build_model_meta(depth):
         model_meta = GPT(config)
     return model_meta
 
-# 构建模型、移至设备、初始化权重
-# Build the model, move to device, init the weights
-model = build_model_meta(args.depth) # 1) 在 meta 设备上构建（仅形状/数据类型，无数据）/ Build on meta device (only shapes/dtypes, no data)
+# 三步构建模型：
+#   Step 1: meta 设备构建（只知形状，不占内存）→ 拿到结构和参数量
+#   Step 2: to_empty 分配真实显存（数据是垃圾值）
+#   Step 3: init_weights 初始化所有参数（正态分布/零）
+model = build_model_meta(args.depth)
 model_config = model.config
 model_config_kwargs = asdict(model_config)
 print0(f"Model config:\n{json.dumps(model_config_kwargs, indent=2)}")
-model.to_empty(device=device) # 2) 在目标设备上分配存储空间，但数据未初始化（垃圾数据）/ All tensors get storage on target device but with uninitialized (garbage) data
-model.init_weights() # 3) 初始化所有权重张量 / All tensors get initialized
+
+# Step 2: 从 meta 设备 → 真实设备（CPU/GPU）
+# to_empty() = 在目标设备上分配未初始化内存（数据是垃圾），比 torch.zeros 快（省去清零）
+model.to_empty(device=device)
+
+# Step 3: 初始化所有参数
+# - Linear 权重: 正态分布 N(0, 1/sqrt(fan_in))，截断到 [-3σ, 3σ]
+# - Embedding: 正态分布 N(0, 1/sqrt(embed_dim))
+# - 标量参数 (resid_lambdas, x0_lambdas 等): 全 0 或全 1
+# - 偏置: 无（nanochat 所有 Linear 层无 bias）
+model.init_weights()
 
 # 如果从检查点恢复训练，用检查点的参数覆盖模型参数
 # If we are resuming, overwrite the model parameters with those of the checkpoint
