@@ -9,7 +9,22 @@
       "PowerShell(Write-Host \"D盘是否可用:\" \\(Test-Path \"D:\\\\\"\\); Write-Host \"现有 D:\\\\uv 是否存在:\" \\(Test-Path \"D:\\\\uv\"\\))",
       "PowerShell([Environment]::SetEnvironmentVariable\\(\"UV_CACHE_DIR\", \"D:\\\\uv\\\\cache\", \"User\"\\); [Environment]::SetEnvironmentVariable\\(\"UV_TOOL_DIR\", \"D:\\\\uv\\\\tools\", \"User\"\\); [Environment]::SetEnvironmentVariable\\(\"UV_PYTHON_INSTALL_DIR\", \"D:\\\\uv\\\\python\", \"User\"\\); Write-Host \"环境变量已设置:\"; Write-Host \"  UV_CACHE_DIR = $\\([Environment]::GetEnvironmentVariable\\('UV_CACHE_DIR','User'\\)\\)\"; Write-Host \"  UV_TOOL_DIR = $\\([Environment]::GetEnvironmentVariable\\('UV_TOOL_DIR','User'\\)\\)\"; Write-Host \"  UV_PYTHON_INSTALL_DIR = $\\([Environment]::GetEnvironmentVariable\\('UV_PYTHON_INSTALL_DIR','User'\\)\\)\")",
       "PowerShell(Get-ChildItem *)",
-      "Bash(git restore:*)"
+      "Bash(git restore:*)",
+      "Bash(uv --version)",
+      "Bash(mkdir -p /d/devTools)",
+      "Bash(cp /c/Users/tz/.local/bin/uv.exe /d/devTools/)",
+      "Bash(cp /c/Users/tz/.local/bin/uvx.exe /d/devTools/)",
+      "Bash(cp /c/Users/tz/.local/bin/uvw.exe /d/devTools/)",
+      "Bash(/d/devTools/uv.exe --version)",
+      "Read(//c/Users/tz/**)",
+      "Bash(powershell -Command \"[System.Environment]::GetEnvironmentVariable\\('PATH', 'User'\\)\")",
+      "Bash(powershell -Command \"[System.Environment]::GetEnvironmentVariable\\('UV_HOME', 'User'\\)\")",
+      "Bash(powershell -Command ' *)",
+      "Bash(uv self *)",
+      "Bash(uv cache *)"
+    ],
+    "additionalDirectories": [
+      "D:\\devTools"
     ]
   }
 }
