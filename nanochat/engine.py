@@ -251,6 +251,8 @@ class Engine:
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         dtype = COMPUTE_DTYPE  # KV缓存精度 = 模型计算精度 (GTX1630→f32, H100→bf16)
+        rng = torch.Generator(device=device)
+        rng.manual_seed(seed)
 
         # 获取工具调用状态机所需的特殊标记ID / Get special token IDs for the tool use state machine
         get_special = lambda s: self.tokenizer.encode_special(s)

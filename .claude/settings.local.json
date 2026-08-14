@@ -21,7 +21,13 @@
       "Bash(powershell -Command \"[System.Environment]::GetEnvironmentVariable\\('UV_HOME', 'User'\\)\")",
       "Bash(powershell -Command ' *)",
       "Bash(uv self *)",
-      "Bash(uv cache *)"
+      "Bash(uv cache *)",
+      "Bash(curl -L -o \"D:\\\\project\\\\codex\\\\nanochat\\\\data\\\\identity_conversations.jsonl\" \"https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl\")",
+      "Bash(sed -i 's/--model-tag\", \"dummy_sft\"/--model-tag\", \"d2\"/g' .vscode/launch.json)",
+      "Bash(sed -i 's/--model-tag\", \"dummy\"/--model-tag\", \"d2\"/g' .vscode/launch.json)",
+      "Bash(ls -la \"C:/Users/tz/.cache/nanochat/\" 2>&1 || echo \"--- does not exist ---\")",
+      "Read(//c/Users/tz/.cache/nanochat/**)",
+      "Bash(python -c ' *)"
     ],
     "additionalDirectories": [
       "D:\\devTools",

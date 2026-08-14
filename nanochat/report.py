@@ -221,6 +221,9 @@ Generated: {timestamp}
 def slugify(text):
     """将文本字符串转换为 slug 格式。
     Slugify a text string."""
+    # 替换路径分隔符和其他不安全的文件名字符
+    for ch in "/\\:*?\"<>|":
+        text = text.replace(ch, "-")
     return text.lower().replace(" ", "-")
 
 # 预期存在的文件及其顺序
