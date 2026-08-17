@@ -53,6 +53,7 @@
                 "TORCH_COMPILE_DISABLE": "1"
             },
             "args": [
+                "--head-dim", "32",
                 "--depth", "2",                  // 极小模型: 2层
                 "--max-seq-len", "512",          // 短序列
                 "--device-batch-size", "1",      // CPU 最小批次

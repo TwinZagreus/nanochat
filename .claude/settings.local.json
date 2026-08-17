@@ -27,7 +27,9 @@
       "Bash(sed -i 's/--model-tag\", \"dummy\"/--model-tag\", \"d2\"/g' .vscode/launch.json)",
       "Bash(ls -la \"C:/Users/tz/.cache/nanochat/\" 2>&1 || echo \"--- does not exist ---\")",
       "Read(//c/Users/tz/.cache/nanochat/**)",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import rustbpe; print\\(rustbpe.__file__\\)\")",
+      "Bash(python -c \"import rustbpe; print\\(type\\(rustbpe.Tokenizer\\)\\)\")"
     ],
     "additionalDirectories": [
       "D:\\devTools",
